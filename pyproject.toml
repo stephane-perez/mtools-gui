@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mtools-gui"
-version = "0.4.1"
+# The version lives only in src/mtools_gui/__init__.py (__version__), read
+# from there at build time - see [tool.hatch.version].
+dynamic = ["version"]
 description = "Two-pane file manager for exchanging files between Linux and a DOS/FAT partition on a removable drive, via mtools."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +26,9 @@ test = ["pytest>=7"]
 [project.scripts]
 mtools-gui = "mtools_gui.app:main"
 mtools-gui-install-helper = "mtools_gui.install_helper:main"
+
+[tool.hatch.version]
+path = "src/mtools_gui/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mtools_gui"]
