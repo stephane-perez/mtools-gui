@@ -27,6 +27,9 @@ from the git history.
 
 ### Changed
 
+- The version number lives only in `src/mtools_gui/__init__.py`;
+  `pyproject.toml` reads it from there. The AppImage release workflow
+  refuses a `v*` tag that doesn't match it.
 - The overwrite confirmation compares names as they will actually be
   written (after 8.3 conversion, case-insensitively on the DOS side), and
   lists the existing destination names that are about to be replaced.
