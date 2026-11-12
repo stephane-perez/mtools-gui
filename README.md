@@ -1,4 +1,4 @@
-# mtools_gui
+# mtools-gui
 
 A two-pane file manager (Midnight/Total Commander style) for exchanging
 files between the local Linux filesystem and a DOS/FAT partition on a
@@ -31,7 +31,7 @@ Two ways to install, pick whichever suits you:
 ### AppImage (no Python/pip needed)
 
 Download `mtools_gui-x86_64.AppImage` from the
-[releases page](https://github.com/stephane-perez/mtools_gui/releases),
+[releases page](https://github.com/stephane-perez/mtools-gui/releases),
 then:
 
 ```bash
