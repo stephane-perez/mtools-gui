@@ -9,8 +9,10 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, device_discovery
+from . import __version__, device_discovery, mtools_client
 from .backends.dos_backend import DosBackend
 from .backends.local_backend import LocalBackend
 from .constants import HELPER_INSTALL_PATH, INSTALL_HELPER_COMMAND
@@ -111,12 +113,35 @@ class MainWindow(QMainWindow):
         # present on this system - see _refresh_drives/_on_drive_selected.
         self._pending_right_device = self.settings.value("right_pane/device", None)
         self._pending_right_path = self.settings.value("right_pane/path", "/")
+        self._pending_right_image = self.settings.value("right_pane/image", None)
 
         self._drive_candidates: list[DriveCandidate] = []
         self.drive_combo = QComboBox(self)
         self.drive_combo.currentIndexChanged.connect(self._on_drive_selected)
         refresh_drives_button = QPushButton(_("drive_refresh_button"), self)
         refresh_drives_button.clicked.connect(self._refresh_drives)
+
+        # A floppy disk image (e.g. an Atari ST .ST) is the alternative to
+        # a physical drive for the right pane - never both at once:
+        # mounting an image resets the drive combo to its placeholder, and
+        # picking a drive unmounts the image.
+        self._mounted_image: str | None = None
+        self.open_image_button = QPushButton(_("image_open_button"), self)
+        self.open_image_button.setToolTip(_("image_open_tooltip"))
+        self.open_image_button.clicked.connect(self._choose_image)
+        self.unmount_image_button = QPushButton(_("image_unmount_button"), self)
+        self.unmount_image_button.clicked.connect(self.unmount_image)
+        self.unmount_image_button.setEnabled(False)
+        self.image_label = QLabel("", self)
+
+        # On by default: the drives this tool exists for (Atari TOS/GEMDOS,
+        # plain DOS) can't see VFAT long names - see dos_names.py.
+        self.short_names_checkbox = QCheckBox(_("short_names_checkbox"), self)
+        self.short_names_checkbox.setToolTip(_("short_names_tooltip"))
+        self.short_names_checkbox.setChecked(
+            self.settings.value("dos/short_names", True, type=bool)
+        )
+        self.short_names_checkbox.toggled.connect(self._on_short_names_toggled)
 
         # The drive picker sits on its own row, above both panes rather
         # than inside the right pane's own layout - otherwise the right
@@ -126,6 +151,11 @@ class MainWindow(QMainWindow):
         drive_row.addWidget(QLabel(_("drive_label"), self))
         drive_row.addWidget(self.drive_combo, stretch=1)
         drive_row.addWidget(refresh_drives_button)
+        drive_row.addWidget(self.open_image_button)
+        drive_row.addWidget(self.unmount_image_button)
+        drive_row.addWidget(self.image_label)
+        drive_row.addStretch(0)
+        drive_row.addWidget(self.short_names_checkbox)
 
         splitter = QSplitter(self)
         splitter.addWidget(self.left_pane)
@@ -145,6 +175,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(_("status_ready"))
 
         self._refresh_drives()
+        self._restore_image()
         self._check_helper_installed()
 
     # -- setup -----------------------------------------------------------
@@ -272,7 +303,10 @@ class MainWindow(QMainWindow):
             and isinstance(self.right_pane.backend, DosBackend)
             and self.right_pane.backend.device == preferred_path
         )
-        if not already_attached:
+        # A mounted image leaves the combo on its placeholder: refreshing
+        # the drive list must not unmount it.
+        image_mounted = restore_index == 0 and self._mounted_image is not None
+        if not already_attached and not image_mounted:
             self._on_drive_selected(restore_index)
 
     def _on_drive_selected(self, index: int) -> None:
@@ -280,10 +314,86 @@ class MainWindow(QMainWindow):
         if candidate is None:
             self.right_pane.set_backend(None)
             return
+        if self._mounted_image is not None:
+            logger.info("DOS drive selected, unmounting image %s", self._mounted_image)
+            self._set_mounted_image(None)
         initial_path = self._pending_right_path or "/"
         self._pending_right_path = None
         logger.info("DOS drive selected: %s (initial path %s)", candidate.path, initial_path)
-        self.right_pane.set_backend(DosBackend(candidate.path), initial_path)
+        self.right_pane.set_backend(self._make_dos_backend(candidate.path), initial_path)
+
+    def _make_dos_backend(self, device: str) -> DosBackend:
+        return DosBackend(device, short_names=self.short_names_checkbox.isChecked())
+
+    def _on_short_names_toggled(self, checked: bool) -> None:
+        logger.info("8.3 short names: %s", "on" if checked else "off")
+        self.settings.setValue("dos/short_names", checked)
+        if isinstance(self.right_pane.backend, DosBackend):
+            self.right_pane.backend.short_names = checked
+
+    # -- disk image -------------------------------------------------------
+
+    def _choose_image(self) -> None:
+        start_dir = self.settings.value("image/last_dir", str(Path.home()))
+        path, _filter = QFileDialog.getOpenFileName(
+            self, _("image_dialog_title"), start_dir, _("image_dialog_filter")
+        )
+        if path:
+            self.settings.setValue("image/last_dir", os.path.dirname(path))
+            self.mount_image(path)
+
+    def mount_image(self, path: str, initial_path: str = "/") -> bool:
+        """Show the disk image `path` in the right pane, replacing whatever
+        drive or image was there. Returns False (and leaves the right pane
+        untouched) if mtools can't read it."""
+        path = os.path.abspath(path)
+        try:
+            # Probe first, so a file that isn't a FAT image doesn't leave
+            # an empty pane with only a status bar error to explain it.
+            mtools_client.list_dir(path, "::")
+        except mtools_client.MtoolsClientError as exc:
+            logger.error("Could not mount image %s: %s", path, exc)
+            QMessageBox.warning(
+                self, _("dialog_error_title"), _("image_mount_failed", path=path, error=exc)
+            )
+            return False
+        logger.info("Disk image mounted: %s (initial path %s)", path, initial_path)
+        self.drive_combo.blockSignals(True)
+        self.drive_combo.setCurrentIndex(0)
+        self.drive_combo.blockSignals(False)
+        self._set_mounted_image(path)
+        self.right_pane.set_backend(self._make_dos_backend(path), initial_path)
+        return True
+
+    def unmount_image(self) -> None:
+        if self._mounted_image is None:
+            return
+        logger.info("Disk image unmounted: %s", self._mounted_image)
+        self._set_mounted_image(None)
+        self.right_pane.set_backend(None)
+
+    def _set_mounted_image(self, path: str | None) -> None:
+        self._mounted_image = path
+        self.unmount_image_button.setEnabled(path is not None)
+        if path is None:
+            self.image_label.setText("")
+            self.image_label.setToolTip("")
+        else:
+            self.image_label.setText(_("image_mounted_label", name=os.path.basename(path)))
+            self.image_label.setToolTip(path)
+
+    def _restore_image(self) -> None:
+        # Startup only: re-mount the image from the previous session, unless
+        # a drive was restored instead (the two are mutually exclusive).
+        image = self._pending_right_image
+        self._pending_right_image = None
+        if not image or self.drive_combo.currentData() is not None:
+            return
+        if not os.path.isfile(image):
+            logger.info("Saved disk image not found (%s), not restoring it", image)
+            return
+        self.mount_image(image, self._pending_right_path or "/")
+        self._pending_right_path = None
 
     # -- operations -----------------------------------------------------
 
@@ -332,20 +442,39 @@ class MainWindow(QMainWindow):
         # against a fresh listing (not the possibly-stale pane model) and
         # confirm before clobbering anything.
         try:
-            dst_by_name = {e.name: e for e in dst.backend.list_dir(dst.current_path)}
+            dst_listing = dst.backend.list_dir(dst.current_path)
         except Exception as exc:
             logger.error("Could not check destination contents before transfer: %s", exc)
-            dst_by_name = {}
+            dst_listing = []
 
-        conflicts = {e.name: dst_by_name[e.name] for e in entries if e.name in dst_by_name}
+        # Names the entries will actually get at the destination: a copy
+        # from Linux onto a DOS drive in 8.3 mode renames them (e.g.
+        # "Mon fichier.txt" lands as "MONFICHI.TXT", which may well exist
+        # already). DOS names are case-insensitive, so compare them that way.
+        names = [e.name for e in entries]
+        if isinstance(dst.backend, DosBackend):
+            if isinstance(src.backend, DosBackend):
+                targets = names  # copied/moved within DOS: names are kept
+            else:
+                targets = dst.backend.target_names(names)
+            dst_by_name = {e.name.upper(): e for e in dst_listing}
+            targets = [t.upper() for t in targets]
+        else:
+            dst_by_name = {e.name: e for e in dst_listing}
+            targets = names
+        conflicts = {
+            e.name: dst_by_name[t] for e, t in zip(entries, targets) if t in dst_by_name
+        }
         if conflicts:
-            names = ", ".join(conflicts)
+            # The names as they exist at the destination (after any 8.3
+            # conversion), i.e. what is actually about to be replaced.
+            replaced = [r.name for r in conflicts.values()]
             if QMessageBox.question(
                 self,
                 _("confirm_overwrite_title"),
-                _("confirm_overwrite_text", names=_format_name_list_for_dialog(list(conflicts))),
+                _("confirm_overwrite_text", names=_format_name_list_for_dialog(replaced)),
             ) != QMessageBox.Yes:
-                logger.info("Overwrite cancelled by the user: %s", names)
+                logger.info("Overwrite cancelled by the user: %s", ", ".join(replaced))
                 return
 
         verb = "Move" if move else "Copy"
@@ -483,11 +612,20 @@ class MainWindow(QMainWindow):
         candidate: DriveCandidate | None = self.drive_combo.currentData()
         if candidate is not None:
             self.settings.setValue("right_pane/device", candidate.path)
+            self.settings.remove("right_pane/image")
             self.settings.setValue("right_pane/path", self.right_pane.current_path)
             logger.info(
                 "Saving DOS drive: %s (path %s)", candidate.path, self.right_pane.current_path
             )
+        elif self._mounted_image is not None:
+            self.settings.setValue("right_pane/image", self._mounted_image)
+            self.settings.remove("right_pane/device")
+            self.settings.setValue("right_pane/path", self.right_pane.current_path)
+            logger.info(
+                "Saving disk image: %s (path %s)", self._mounted_image, self.right_pane.current_path
+            )
         else:
             self.settings.remove("right_pane/device")
+            self.settings.remove("right_pane/image")
             self.settings.remove("right_pane/path")
         super().closeEvent(event)

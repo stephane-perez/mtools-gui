@@ -113,6 +113,38 @@ This installs, once per machine:
 mtools-gui
 ```
 
+## 8.3 file names
+
+Atari TOS/GEMDOS and plain DOS only understand short `NAME.EXT` names
+(8 characters, a 3-character extension, uppercase); a VFAT long name is
+invisible to them. With **8.3 names** ticked (the default, next to the
+drive picker), every file or folder copied from Linux, created or
+renamed on the DOS side gets an uppercase 8.3 name - e.g.
+`Un fichier très long.txt` becomes `UNFICHIE.TXT`, `Mon Dossier` becomes
+`MONDOSSI`, including inside copied folders. Accents are dropped
+(`été` -> `ETE`), spaces removed, other forbidden characters replaced by
+`_`; two names that would collide in the same copy are told apart with
+`~1`, `~2`, ... Names already on the drive are never changed. Untick it
+to keep long names (for a PC-only FAT drive, for instance).
+
+## Floppy disk images
+
+Instead of a physical drive, the right pane can also show the contents
+of a floppy disk image file - e.g. an Atari ST `.ST` image (also `.IMG`,
+`.IMA`, `.DSK`, `.VFD`, or any raw FAT image). Click **Disk image...**
+(next to **Refresh drives**), pick the file, and copy, move, rename,
+delete or create files and folders inside it exactly as on a real drive.
+**Unmount image** releases it.
+
+The right pane shows either a drive or an image, never both: mounting
+an image deselects the drive, and choosing a drive unmounts the image.
+
+An image is an ordinary file you own, so mtools opens it directly with
+your own permissions - the privileged helper isn't involved (and doesn't
+even need to be installed for this). Compressed formats such as `.MSA`
+aren't raw FAT images and can't be opened by mtools: convert them to
+`.ST` first.
+
 ## Language
 
 The interface is in French or English depending on the system locale
