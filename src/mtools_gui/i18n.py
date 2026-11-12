@@ -68,6 +68,20 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "Disk images (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD);;All files (*)",
     },
     "image_mounted_label": {"fr": "Image : {name}", "en": "Image: {name}"},
+    "short_names_checkbox": {"fr": "Noms 8.3", "en": "8.3 names"},
+    "short_names_tooltip": {
+        "fr": (
+            "Convertir en majuscules 8.3 (ex. « Mon fichier.txt » → MONFICHI.TXT) "
+            "les noms des fichiers et dossiers copiés, créés ou renommés sur le "
+            "lecteur DOS ou l'image : Atari TOS et DOS ne voient pas les noms "
+            "longs VFAT."
+        ),
+        "en": (
+            "Convert the names of files and folders copied, created or renamed "
+            "on the DOS drive or image to uppercase 8.3 (e.g. \"My file.txt\" -> "
+            "MYFILE.TXT): Atari TOS and DOS can't see VFAT long names."
+        ),
+    },
     "image_mount_failed": {
         "fr": "Impossible de monter l'image {path} :\n\n{error}",
         "en": "Could not mount the image {path}:\n\n{error}",

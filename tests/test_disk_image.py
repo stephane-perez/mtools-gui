@@ -254,3 +254,37 @@ def test_end_to_end_non_image_file_is_rejected(tmp_path):
     not_an_image.write_text("not a floppy")
     with pytest.raises(mtools_client.MtoolsCommandError):
         DosBackend(str(not_an_image)).list_dir("/")
+
+
+# -- GUI: 8.3 names option ------------------------------------------------------
+
+
+def test_short_names_option_is_on_by_default_and_applied_to_backends(window, tmp_path):
+    assert window.short_names_checkbox.isChecked()
+    window.mount_image(str(tmp_path / "disk.st"))
+    assert window.right_pane.backend.short_names
+
+    window.short_names_checkbox.setChecked(False)
+    assert not window.right_pane.backend.short_names
+    window.drive_combo.setCurrentIndex(1)
+    assert not window.right_pane.backend.short_names
+
+
+def test_overwrite_check_uses_the_converted_name(window, tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from mtools_gui.entry import Entry
+
+    existing = Entry(name="MONFICHI.TXT", is_dir=False, size=1, modified=datetime(2024, 1, 1))
+    window.mount_image(str(tmp_path / "disk.st"))
+    monkeypatch.setattr(window.right_pane.backend, "list_dir", lambda path: [existing])
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: asked.append(a) or QMessageBox.No)
+    )
+    src = Entry(name="Mon fichier.txt", is_dir=False, size=1, modified=datetime(2024, 1, 1))
+
+    window._transfer_entries(window.left_pane, window.right_pane, [src], move=False)
+
+    assert len(asked) == 1
+    assert "MONFICHI.TXT" in asked[0][2]

@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -133,6 +134,15 @@ class MainWindow(QMainWindow):
         self.unmount_image_button.setEnabled(False)
         self.image_label = QLabel("", self)
 
+        # On by default: the drives this tool exists for (Atari TOS/GEMDOS,
+        # plain DOS) can't see VFAT long names - see dos_names.py.
+        self.short_names_checkbox = QCheckBox(_("short_names_checkbox"), self)
+        self.short_names_checkbox.setToolTip(_("short_names_tooltip"))
+        self.short_names_checkbox.setChecked(
+            self.settings.value("dos/short_names", True, type=bool)
+        )
+        self.short_names_checkbox.toggled.connect(self._on_short_names_toggled)
+
         # The drive picker sits on its own row, above both panes rather
         # than inside the right pane's own layout - otherwise the right
         # pane would start one row lower than the left, leaving the two
@@ -144,6 +154,8 @@ class MainWindow(QMainWindow):
         drive_row.addWidget(self.open_image_button)
         drive_row.addWidget(self.unmount_image_button)
         drive_row.addWidget(self.image_label)
+        drive_row.addStretch(0)
+        drive_row.addWidget(self.short_names_checkbox)
 
         splitter = QSplitter(self)
         splitter.addWidget(self.left_pane)
@@ -308,7 +320,16 @@ class MainWindow(QMainWindow):
         initial_path = self._pending_right_path or "/"
         self._pending_right_path = None
         logger.info("DOS drive selected: %s (initial path %s)", candidate.path, initial_path)
-        self.right_pane.set_backend(DosBackend(candidate.path), initial_path)
+        self.right_pane.set_backend(self._make_dos_backend(candidate.path), initial_path)
+
+    def _make_dos_backend(self, device: str) -> DosBackend:
+        return DosBackend(device, short_names=self.short_names_checkbox.isChecked())
+
+    def _on_short_names_toggled(self, checked: bool) -> None:
+        logger.info("8.3 short names: %s", "on" if checked else "off")
+        self.settings.setValue("dos/short_names", checked)
+        if isinstance(self.right_pane.backend, DosBackend):
+            self.right_pane.backend.short_names = checked
 
     # -- disk image -------------------------------------------------------
 
@@ -341,7 +362,7 @@ class MainWindow(QMainWindow):
         self.drive_combo.setCurrentIndex(0)
         self.drive_combo.blockSignals(False)
         self._set_mounted_image(path)
-        self.right_pane.set_backend(DosBackend(path), initial_path)
+        self.right_pane.set_backend(self._make_dos_backend(path), initial_path)
         return True
 
     def unmount_image(self) -> None:
@@ -421,20 +442,39 @@ class MainWindow(QMainWindow):
         # against a fresh listing (not the possibly-stale pane model) and
         # confirm before clobbering anything.
         try:
-            dst_by_name = {e.name: e for e in dst.backend.list_dir(dst.current_path)}
+            dst_listing = dst.backend.list_dir(dst.current_path)
         except Exception as exc:
             logger.error("Could not check destination contents before transfer: %s", exc)
-            dst_by_name = {}
+            dst_listing = []
 
-        conflicts = {e.name: dst_by_name[e.name] for e in entries if e.name in dst_by_name}
+        # Names the entries will actually get at the destination: a copy
+        # from Linux onto a DOS drive in 8.3 mode renames them (e.g.
+        # "Mon fichier.txt" lands as "MONFICHI.TXT", which may well exist
+        # already). DOS names are case-insensitive, so compare them that way.
+        names = [e.name for e in entries]
+        if isinstance(dst.backend, DosBackend):
+            if isinstance(src.backend, DosBackend):
+                targets = names  # copied/moved within DOS: names are kept
+            else:
+                targets = dst.backend.target_names(names)
+            dst_by_name = {e.name.upper(): e for e in dst_listing}
+            targets = [t.upper() for t in targets]
+        else:
+            dst_by_name = {e.name: e for e in dst_listing}
+            targets = names
+        conflicts = {
+            e.name: dst_by_name[t] for e, t in zip(entries, targets) if t in dst_by_name
+        }
         if conflicts:
-            names = ", ".join(conflicts)
+            # The names as they exist at the destination (after any 8.3
+            # conversion), i.e. what is actually about to be replaced.
+            replaced = [r.name for r in conflicts.values()]
             if QMessageBox.question(
                 self,
                 _("confirm_overwrite_title"),
-                _("confirm_overwrite_text", names=_format_name_list_for_dialog(list(conflicts))),
+                _("confirm_overwrite_text", names=_format_name_list_for_dialog(replaced)),
             ) != QMessageBox.Yes:
-                logger.info("Overwrite cancelled by the user: %s", names)
+                logger.info("Overwrite cancelled by the user: %s", ", ".join(replaced))
                 return
 
         verb = "Move" if move else "Copy"
