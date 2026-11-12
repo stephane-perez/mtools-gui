@@ -15,10 +15,19 @@ class DosBackend(Backend):
     Paths are kept as posix-style strings relative to the DOS drive root
     (e.g. "/", "/SUBDIR"); they're translated to mtools' "::"-prefixed
     syntax only at the point of calling mtools_client.
+
+    `device` is either a removable block device (/dev/sdX1, reached
+    through the privileged helper) or the path of a floppy disk image
+    file such as an Atari ST .ST (opened directly by mtools, with the
+    user's own permissions) - mtools_client dispatches on which one it is.
     """
 
     def __init__(self, device: str):
         self.device = device
+
+    @property
+    def is_image(self) -> bool:
+        return mtools_client.is_image_target(self.device)
 
     def _dos_arg(self, path: str) -> str:
         return "::" if path in ("", ROOT) else f"::{path}"

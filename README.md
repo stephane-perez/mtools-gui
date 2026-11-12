@@ -113,6 +113,24 @@ This installs, once per machine:
 mtools-gui
 ```
 
+## Floppy disk images
+
+Instead of a physical drive, the right pane can also show the contents
+of a floppy disk image file - e.g. an Atari ST `.ST` image (also `.IMG`,
+`.IMA`, `.DSK`, `.VFD`, or any raw FAT image). Click **Disk image...**
+(next to **Refresh drives**), pick the file, and copy, move, rename,
+delete or create files and folders inside it exactly as on a real drive.
+**Unmount image** releases it.
+
+The right pane shows either a drive or an image, never both: mounting
+an image deselects the drive, and choosing a drive unmounts the image.
+
+An image is an ordinary file you own, so mtools opens it directly with
+your own permissions - the privileged helper isn't involved (and doesn't
+even need to be installed for this). Compressed formats such as `.MSA`
+aren't raw FAT images and can't be opened by mtools: convert them to
+`.ST` first.
+
 ## Language
 
 The interface is in French or English depending on the system locale

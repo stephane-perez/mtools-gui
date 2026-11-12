@@ -6,6 +6,7 @@ system_files/mtools-gui-helper) into typed results/exceptions.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 
 from .constants import HELPER_INSTALL_PATH, INSTALL_HELPER_COMMAND
@@ -54,6 +55,72 @@ class MtoolsTimeoutError(MtoolsClientError):
         super().__init__(_("err_helper_timeout", op=op, timeout=timeout))
 
 
+# -- Disk images (.ST, .IMG, ...) ----------------------------------------------
+# A disk image is an ordinary file owned by the user, so mtools can open it
+# directly (`mdir -i image.st ::`) with the user's own permissions - no
+# pkexec, no privileged helper, no removable-device validation involved.
+# Only real block devices (always under /dev/) go through the helper.
+# Mirrors the helper's own mtools invocation: same binaries, same
+# MTOOLS_SKIP_CHECK=1 (older Atari ST floppies made with early TOS ROMs
+# have a BPB mtools' geometry check would otherwise reject), same "-s" for
+# mcopy so directories are copied recursively.
+DIRECT_OPS = {"mdir", "mcopy", "mdel", "mdeltree", "mmd", "mmove", "mren", "mattrib", "mrd", "mtype"}
+
+# Runs as the user, so the user's own PATH is fine (and needed if mtools
+# lives somewhere unusual, e.g. on an immutable distribution) - unlike the
+# root helper, which deliberately pins /usr/bin.
+DIRECT_ENV_OVERRIDES = {"LC_ALL": "C", "MTOOLS_SKIP_CHECK": "1"}
+
+
+def is_image_target(target: str) -> bool:
+    """True for a disk image file, False for a block device."""
+    return not target.startswith("/dev/")
+
+
+def _run_direct(op: str, image_path: str, args: list[str]) -> str:
+    if op not in DIRECT_OPS:
+        raise MtoolsClientError(_("err_usage_default"))
+    extra_flags = ["-s"] if op == "mcopy" else []
+    argv = [op, "-i", image_path, *extra_flags, *args]
+    timeout = HELPER_COPY_TIMEOUT_SECONDS if op == "mcopy" else HELPER_TIMEOUT_SECONDS
+    logger.debug("Direct mtools call: %s (timeout=%ss)", " ".join(argv), timeout)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, **DIRECT_ENV_OVERRIDES},
+            # mcopy may ask interactively on a name clash; never let it
+            # wait for a keyboard that doesn't exist.
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        logger.error("%s not found", op)
+        raise MtoolsClientError(_("err_mtools_not_found", op=op)) from exc
+    except subprocess.TimeoutExpired as exc:
+        logger.error("%s (image=%s) timed out after %ss", op, image_path, timeout)
+        raise MtoolsTimeoutError(op, timeout) from exc
+
+    if proc.returncode == 0:
+        if proc.stderr.strip():
+            logger.debug("%s (image=%s): mtools warning: %s", op, image_path, proc.stderr.strip())
+        return proc.stdout
+    logger.debug(
+        "%s (image=%s) failed: code=%s stderr=%s",
+        op, image_path, proc.returncode, proc.stderr.strip(),
+    )
+    raise MtoolsCommandError(proc.stderr.strip() or _("err_command_default", op=op))
+
+
+def _run(op: str, target: str, args: list[str]) -> str:
+    """Dispatch: a disk image is handled directly, a block device through
+    the privileged helper."""
+    if is_image_target(target):
+        return _run_direct(op, target, args)
+    return _run_helper(op, target, args)
+
+
 def _run_helper(op: str, device: str, args: list[str]) -> str:
     argv = ["pkexec", HELPER_INSTALL_PATH, op, device, *args]
     timeout = HELPER_COPY_TIMEOUT_SECONDS if op == "mcopy" else HELPER_TIMEOUT_SECONDS
@@ -94,28 +161,28 @@ def _run_helper(op: str, device: str, args: list[str]) -> str:
 
 
 def list_dir(device: str, dos_path: str) -> list[Entry]:
-    output = _run_helper("mdir", device, [dos_path])
+    output = _run("mdir", device, [dos_path])
     return parse_mdir_output(output)
 
 
 def delete(device: str, dos_path: str) -> None:
-    _run_helper("mdel", device, [dos_path])
+    _run("mdel", device, [dos_path])
 
 
 def delete_recursive(device: str, dos_path: str) -> None:
-    _run_helper("mdeltree", device, [dos_path])
+    _run("mdeltree", device, [dos_path])
 
 
 def mkdir(device: str, dos_path: str) -> None:
-    _run_helper("mmd", device, [dos_path])
+    _run("mmd", device, [dos_path])
 
 
 def rmdir(device: str, dos_path: str) -> None:
-    _run_helper("mrd", device, [dos_path])
+    _run("mrd", device, [dos_path])
 
 
 def rename(device: str, old_dos_path: str, new_dos_path: str) -> None:
-    _run_helper("mren", device, [old_dos_path, new_dos_path])
+    _run("mren", device, [old_dos_path, new_dos_path])
 
 
 # -- Batch variants -----------------------------------------------------------
@@ -131,28 +198,28 @@ def rename(device: str, old_dos_path: str, new_dos_path: str) -> None:
 
 
 def copy_many_unix_to_dos(device: str, unix_paths: list[str], dos_dir: str) -> None:
-    _run_helper("mcopy", device, [*unix_paths, dos_dir])
+    _run("mcopy", device, [*unix_paths, dos_dir])
 
 
 def copy_many_dos_to_unix(device: str, dos_paths: list[str], unix_dir: str) -> None:
-    _run_helper("mcopy", device, [*dos_paths, unix_dir])
+    _run("mcopy", device, [*dos_paths, unix_dir])
 
 
 def copy_within_dos_many(device: str, src_dos_paths: list[str], dst_dos_dir: str) -> None:
-    _run_helper("mcopy", device, [*src_dos_paths, dst_dos_dir])
+    _run("mcopy", device, [*src_dos_paths, dst_dos_dir])
 
 
 def move_within_dos_many(device: str, src_dos_paths: list[str], dst_dos_dir: str) -> None:
-    _run_helper("mmove", device, [*src_dos_paths, dst_dos_dir])
+    _run("mmove", device, [*src_dos_paths, dst_dos_dir])
 
 
 def delete_many(device: str, dos_paths: list[str]) -> None:
-    _run_helper("mdel", device, dos_paths)
+    _run("mdel", device, dos_paths)
 
 
 def delete_recursive_many(device: str, dos_paths: list[str]) -> None:
-    _run_helper("mdeltree", device, dos_paths)
+    _run("mdeltree", device, dos_paths)
 
 
 def read_text(device: str, dos_path: str) -> str:
-    return _run_helper("mtype", device, [dos_path])
+    return _run("mtype", device, [dos_path])

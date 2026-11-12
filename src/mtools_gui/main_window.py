@@ -11,6 +11,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, device_discovery
+from . import __version__, device_discovery, mtools_client
 from .backends.dos_backend import DosBackend
 from .backends.local_backend import LocalBackend
 from .constants import HELPER_INSTALL_PATH, INSTALL_HELPER_COMMAND
@@ -111,12 +112,26 @@ class MainWindow(QMainWindow):
         # present on this system - see _refresh_drives/_on_drive_selected.
         self._pending_right_device = self.settings.value("right_pane/device", None)
         self._pending_right_path = self.settings.value("right_pane/path", "/")
+        self._pending_right_image = self.settings.value("right_pane/image", None)
 
         self._drive_candidates: list[DriveCandidate] = []
         self.drive_combo = QComboBox(self)
         self.drive_combo.currentIndexChanged.connect(self._on_drive_selected)
         refresh_drives_button = QPushButton(_("drive_refresh_button"), self)
         refresh_drives_button.clicked.connect(self._refresh_drives)
+
+        # A floppy disk image (e.g. an Atari ST .ST) is the alternative to
+        # a physical drive for the right pane - never both at once:
+        # mounting an image resets the drive combo to its placeholder, and
+        # picking a drive unmounts the image.
+        self._mounted_image: str | None = None
+        self.open_image_button = QPushButton(_("image_open_button"), self)
+        self.open_image_button.setToolTip(_("image_open_tooltip"))
+        self.open_image_button.clicked.connect(self._choose_image)
+        self.unmount_image_button = QPushButton(_("image_unmount_button"), self)
+        self.unmount_image_button.clicked.connect(self.unmount_image)
+        self.unmount_image_button.setEnabled(False)
+        self.image_label = QLabel("", self)
 
         # The drive picker sits on its own row, above both panes rather
         # than inside the right pane's own layout - otherwise the right
@@ -126,6 +141,9 @@ class MainWindow(QMainWindow):
         drive_row.addWidget(QLabel(_("drive_label"), self))
         drive_row.addWidget(self.drive_combo, stretch=1)
         drive_row.addWidget(refresh_drives_button)
+        drive_row.addWidget(self.open_image_button)
+        drive_row.addWidget(self.unmount_image_button)
+        drive_row.addWidget(self.image_label)
 
         splitter = QSplitter(self)
         splitter.addWidget(self.left_pane)
@@ -145,6 +163,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(_("status_ready"))
 
         self._refresh_drives()
+        self._restore_image()
         self._check_helper_installed()
 
     # -- setup -----------------------------------------------------------
@@ -272,7 +291,10 @@ class MainWindow(QMainWindow):
             and isinstance(self.right_pane.backend, DosBackend)
             and self.right_pane.backend.device == preferred_path
         )
-        if not already_attached:
+        # A mounted image leaves the combo on its placeholder: refreshing
+        # the drive list must not unmount it.
+        image_mounted = restore_index == 0 and self._mounted_image is not None
+        if not already_attached and not image_mounted:
             self._on_drive_selected(restore_index)
 
     def _on_drive_selected(self, index: int) -> None:
@@ -280,10 +302,77 @@ class MainWindow(QMainWindow):
         if candidate is None:
             self.right_pane.set_backend(None)
             return
+        if self._mounted_image is not None:
+            logger.info("DOS drive selected, unmounting image %s", self._mounted_image)
+            self._set_mounted_image(None)
         initial_path = self._pending_right_path or "/"
         self._pending_right_path = None
         logger.info("DOS drive selected: %s (initial path %s)", candidate.path, initial_path)
         self.right_pane.set_backend(DosBackend(candidate.path), initial_path)
+
+    # -- disk image -------------------------------------------------------
+
+    def _choose_image(self) -> None:
+        start_dir = self.settings.value("image/last_dir", str(Path.home()))
+        path, _filter = QFileDialog.getOpenFileName(
+            self, _("image_dialog_title"), start_dir, _("image_dialog_filter")
+        )
+        if path:
+            self.settings.setValue("image/last_dir", os.path.dirname(path))
+            self.mount_image(path)
+
+    def mount_image(self, path: str, initial_path: str = "/") -> bool:
+        """Show the disk image `path` in the right pane, replacing whatever
+        drive or image was there. Returns False (and leaves the right pane
+        untouched) if mtools can't read it."""
+        path = os.path.abspath(path)
+        try:
+            # Probe first, so a file that isn't a FAT image doesn't leave
+            # an empty pane with only a status bar error to explain it.
+            mtools_client.list_dir(path, "::")
+        except mtools_client.MtoolsClientError as exc:
+            logger.error("Could not mount image %s: %s", path, exc)
+            QMessageBox.warning(
+                self, _("dialog_error_title"), _("image_mount_failed", path=path, error=exc)
+            )
+            return False
+        logger.info("Disk image mounted: %s (initial path %s)", path, initial_path)
+        self.drive_combo.blockSignals(True)
+        self.drive_combo.setCurrentIndex(0)
+        self.drive_combo.blockSignals(False)
+        self._set_mounted_image(path)
+        self.right_pane.set_backend(DosBackend(path), initial_path)
+        return True
+
+    def unmount_image(self) -> None:
+        if self._mounted_image is None:
+            return
+        logger.info("Disk image unmounted: %s", self._mounted_image)
+        self._set_mounted_image(None)
+        self.right_pane.set_backend(None)
+
+    def _set_mounted_image(self, path: str | None) -> None:
+        self._mounted_image = path
+        self.unmount_image_button.setEnabled(path is not None)
+        if path is None:
+            self.image_label.setText("")
+            self.image_label.setToolTip("")
+        else:
+            self.image_label.setText(_("image_mounted_label", name=os.path.basename(path)))
+            self.image_label.setToolTip(path)
+
+    def _restore_image(self) -> None:
+        # Startup only: re-mount the image from the previous session, unless
+        # a drive was restored instead (the two are mutually exclusive).
+        image = self._pending_right_image
+        self._pending_right_image = None
+        if not image or self.drive_combo.currentData() is not None:
+            return
+        if not os.path.isfile(image):
+            logger.info("Saved disk image not found (%s), not restoring it", image)
+            return
+        self.mount_image(image, self._pending_right_path or "/")
+        self._pending_right_path = None
 
     # -- operations -----------------------------------------------------
 
@@ -483,11 +572,20 @@ class MainWindow(QMainWindow):
         candidate: DriveCandidate | None = self.drive_combo.currentData()
         if candidate is not None:
             self.settings.setValue("right_pane/device", candidate.path)
+            self.settings.remove("right_pane/image")
             self.settings.setValue("right_pane/path", self.right_pane.current_path)
             logger.info(
                 "Saving DOS drive: %s (path %s)", candidate.path, self.right_pane.current_path
             )
+        elif self._mounted_image is not None:
+            self.settings.setValue("right_pane/image", self._mounted_image)
+            self.settings.remove("right_pane/device")
+            self.settings.setValue("right_pane/path", self.right_pane.current_path)
+            logger.info(
+                "Saving disk image: %s (path %s)", self._mounted_image, self.right_pane.current_path
+            )
         else:
             self.settings.remove("right_pane/device")
+            self.settings.remove("right_pane/image")
             self.settings.remove("right_pane/path")
         super().closeEvent(event)

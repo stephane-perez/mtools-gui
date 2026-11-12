@@ -56,6 +56,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "unknown type - probably DOS",
     },
     "drive_no_label": {"fr": "(sans nom)", "en": "(no label)"},
+    "image_open_button": {"fr": "Image disquette…", "en": "Disk image…"},
+    "image_open_tooltip": {
+        "fr": "Monter une image disquette (.ST Atari, .IMG, ...) dans le volet droit",
+        "en": "Mount a floppy disk image (Atari .ST, .IMG, ...) in the right pane",
+    },
+    "image_unmount_button": {"fr": "Démonter l'image", "en": "Unmount image"},
+    "image_dialog_title": {"fr": "Choisir une image disquette", "en": "Choose a disk image"},
+    "image_dialog_filter": {
+        "fr": "Images disquette (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD);;Tous les fichiers (*)",
+        "en": "Disk images (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD);;All files (*)",
+    },
+    "image_mounted_label": {"fr": "Image : {name}", "en": "Image: {name}"},
+    "image_mount_failed": {
+        "fr": "Impossible de monter l'image {path} :\n\n{error}",
+        "en": "Could not mount the image {path}:\n\n{error}",
+    },
     "pane_up_button": {"fr": "Remonter", "en": "Up"},
     "column_name": {"fr": "Nom", "en": "Name"},
     "column_size": {"fr": "Taille", "en": "Size"},
@@ -89,8 +105,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "status_choose_drive": {
-        "fr": "Choisissez d'abord un lecteur DOS",
-        "en": "Choose a DOS drive first",
+        "fr": "Choisissez d'abord un lecteur DOS ou une image disquette",
+        "en": "Choose a DOS drive or a disk image first",
     },
     "status_select_one_to_rename": {
         "fr": "Sélectionnez un seul élément à renommer",
@@ -118,6 +134,10 @@ _STRINGS: dict[str, dict[str, str]] = {
     "dialog_rename_title": {"fr": "Renommer", "en": "Rename"},
     "dialog_rename_label": {"fr": "Nouveau nom :", "en": "New name:"},
     "dialog_error_title": {"fr": "Erreur", "en": "Error"},
+    "err_mtools_not_found": {
+        "fr": "Commande {op} introuvable : mtools est-il installé ?",
+        "en": "{op} command not found: is mtools installed?",
+    },
     "dialog_install_required_title": {
         "fr": "Installation requise pour accéder aux périphériques amovibles",
         "en": "Installation required to access removable drives",
