@@ -7,7 +7,7 @@ this project follows [Semantic Versioning](https://semver.org/).
 Versions before this file existed (0.1.0 - 0.4.1) were reconstructed
 from the git history.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-13
 
 ### Added
 
