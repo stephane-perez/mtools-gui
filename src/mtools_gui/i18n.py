@@ -64,10 +64,14 @@ _STRINGS: dict[str, dict[str, str]] = {
     "image_unmount_button": {"fr": "Démonter l'image", "en": "Unmount image"},
     "image_dialog_title": {"fr": "Choisir une image disquette", "en": "Choose a disk image"},
     "image_dialog_filter": {
-        "fr": "Images disquette (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD);;Tous les fichiers (*)",
-        "en": "Disk images (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD);;All files (*)",
+        "fr": "Images disquette (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD *.msa *.MSA);;Tous les fichiers (*)",
+        "en": "Disk images (*.st *.ST *.img *.IMG *.ima *.IMA *.dsk *.DSK *.vfd *.VFD *.msa *.MSA);;All files (*)",
     },
     "image_mounted_label": {"fr": "Image : {name}", "en": "Image: {name}"},
+    "msa_save_failed": {
+        "fr": "Impossible d'enregistrer l'image MSA {path} :\\n\\n{error}\\n\\nL'image temporaire est conservée ; corrigez le problème puis réessayez de démonter ou de fermer l'application.",
+        "en": "Could not save MSA image {path}:\\n\\n{error}\\n\\nThe temporary image is retained; fix the problem and retry unmounting or closing the application.",
+    },
     "short_names_checkbox": {"fr": "Noms 8.3", "en": "8.3 names"},
     "short_names_tooltip": {
         "fr": (
