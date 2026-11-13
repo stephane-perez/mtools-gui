@@ -58,8 +58,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     "drive_no_label": {"fr": "(sans nom)", "en": "(no label)"},
     "image_open_button": {"fr": "Image disquette…", "en": "Disk image…"},
     "image_open_tooltip": {
-        "fr": "Monter une image disquette (.ST Atari, .IMG, ...) dans le volet droit",
-        "en": "Mount a floppy disk image (Atari .ST, .IMG, ...) in the right pane",
+        "fr": "Monter une image disquette (.ST, .MSA, .IMG, ...) dans le volet droit",
+        "en": "Mount a floppy disk image (Atari .ST, .MSA, .IMG, ...) in the right pane",
     },
     "image_unmount_button": {"fr": "Démonter l'image", "en": "Unmount image"},
     "image_dialog_title": {"fr": "Choisir une image disquette", "en": "Choose a disk image"},
