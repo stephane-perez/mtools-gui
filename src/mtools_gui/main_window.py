@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
 from . import __version__, device_discovery, mtools_client
 from .backends.dos_backend import DosBackend
 from .backends.local_backend import LocalBackend
+from .backends.msa_backend import MsaBackend
+from .msa import MsaError
 from .constants import HELPER_INSTALL_PATH, INSTALL_HELPER_COMMAND
 from .device_discovery import DriveCandidate
 from .entry import Entry
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
         # mounting an image resets the drive combo to its placeholder, and
         # picking a drive unmounts the image.
         self._mounted_image: str | None = None
+        self._mounted_msa_backend: MsaBackend | None = None
         self.open_image_button = QPushButton(_("image_open_button"), self)
         self.open_image_button.setToolTip(_("image_open_tooltip"))
         self.open_image_button.clicked.connect(self._choose_image)
@@ -319,7 +322,13 @@ class MainWindow(QMainWindow):
             self.right_pane.set_backend(None)
             return
         if self._mounted_image is not None:
+            if not self._flush_msa_image():
+                self.drive_combo.blockSignals(True)
+                self.drive_combo.setCurrentIndex(0)
+                self.drive_combo.blockSignals(False)
+                return
             logger.info("DOS drive selected, unmounting image %s", self._mounted_image)
+            self._cleanup_msa_backend()
             self._set_mounted_image(None)
         initial_path = self._pending_right_path or "/"
         self._pending_right_path = None
@@ -347,32 +356,67 @@ class MainWindow(QMainWindow):
             self.mount_image(path)
 
     def mount_image(self, path: str, initial_path: str = "/") -> bool:
-        """Show the disk image `path` in the right pane, replacing whatever
-        drive or image was there. Returns False (and leaves the right pane
-        untouched) if mtools can't read it."""
+        """Mount a raw FAT image or an Atari MSA image in the right pane."""
         path = os.path.abspath(path)
+        backend: DosBackend
         try:
-            # Probe first, so a file that isn't a FAT image doesn't leave
-            # an empty pane with only a status bar error to explain it.
-            mtools_client.list_dir(path, "::")
-        except mtools_client.MtoolsClientError as exc:
+            if Path(path).suffix.lower() == ".msa":
+                backend = MsaBackend(path, short_names=self.short_names_checkbox.isChecked())
+            else:
+                backend = self._make_dos_backend(path)
+            # Probe before replacing the currently mounted image.
+            backend.list_dir("/")
+        except (mtools_client.MtoolsClientError, MsaError, OSError) as exc:
+            if "backend" in locals() and isinstance(backend, MsaBackend):
+                backend.cleanup()
             logger.error("Could not mount image %s: %s", path, exc)
             QMessageBox.warning(
                 self, _("dialog_error_title"), _("image_mount_failed", path=path, error=exc)
             )
             return False
+
+        if not self._flush_msa_image():
+            if isinstance(backend, MsaBackend):
+                backend.cleanup()
+            return False
+        self._cleanup_msa_backend()
+
         logger.info("Disk image mounted: %s (initial path %s)", path, initial_path)
         self.drive_combo.blockSignals(True)
         self.drive_combo.setCurrentIndex(0)
         self.drive_combo.blockSignals(False)
         self._set_mounted_image(path)
-        self.right_pane.set_backend(self._make_dos_backend(path), initial_path)
+        self._mounted_msa_backend = backend if isinstance(backend, MsaBackend) else None
+        self.right_pane.set_backend(backend, initial_path)
         return True
+
+    def _flush_msa_image(self) -> bool:
+        """Persist changes from the temporary raw image back to its MSA file."""
+        if self._mounted_msa_backend is None:
+            return True
+        try:
+            self._mounted_msa_backend.flush()
+        except (OSError, MsaError) as exc:
+            logger.exception("Could not save MSA image %s", self._mounted_image)
+            QMessageBox.warning(
+                self, _("dialog_error_title"),
+                _("msa_save_failed", path=self._mounted_image or "", error=exc),
+            )
+            return False
+        return True
+
+    def _cleanup_msa_backend(self) -> None:
+        if self._mounted_msa_backend is not None:
+            self._mounted_msa_backend.cleanup()
+            self._mounted_msa_backend = None
 
     def unmount_image(self) -> None:
         if self._mounted_image is None:
             return
+        if not self._flush_msa_image():
+            return
         logger.info("Disk image unmounted: %s", self._mounted_image)
+        self._cleanup_msa_backend()
         self._set_mounted_image(None)
         self.right_pane.set_backend(None)
 
@@ -619,6 +663,10 @@ class MainWindow(QMainWindow):
     # -- session persistence ------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        if not self._flush_msa_image():
+            event.ignore()
+            return
+        self._cleanup_msa_backend()
         self.settings.setValue("left_pane/path", self.left_pane.current_path)
         logger.info("Saving left pane path: %s", self.left_pane.current_path)
 
