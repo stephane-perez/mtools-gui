@@ -277,6 +277,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "fr": "Lecture de {name} : {error}",
         "en": "Reading {name}: {error}",
     },
+    "view_dialog_too_large_title": {
+        "fr": "Fichier trop volumineux",
+        "en": "File too large",
+    },
+    "view_dialog_too_large_text": {
+        "fr": "Le fichier « {name} » dépasse la limite d'ouverture de {size} Ko.",
+        "en": "File « {name} » exceeds the {size} KB viewing limit.",
+    },
     "install_need_root": {
         "fr": (
             "Ce programme doit être exécuté en root, par exemple :\n"

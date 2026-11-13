@@ -38,6 +38,10 @@ from .transfer_service import TransferService
 
 logger = logging.getLogger(__name__)
 
+# Opening a file displays its complete text in a QPlainTextEdit. Keep the
+# amount of content read into memory bounded.
+MAX_VIEW_FILE_SIZE = 64 * 1024
+
 # A multi-select delete/move/overwrite on a folder with hundreds of
 # entries used to dump the whole comma-joined list into the confirmation
 # dialog - readable for a handful of files, but an unusable wall of text
@@ -550,6 +554,15 @@ class MainWindow(QMainWindow):
         return True
 
     def _view_file(self, pane: PaneWidget, entry: Entry) -> None:
+        # Check the size from the directory listing before asking a backend
+        # to read the file (read_text currently loads the whole content).
+        if entry.size > MAX_VIEW_FILE_SIZE:
+            QMessageBox.information(
+                self,
+                _("view_dialog_too_large_title"),
+                _("view_dialog_too_large_text", name=entry.name, size=MAX_VIEW_FILE_SIZE // 1024),
+            )
+            return
         try:
             content = pane.backend.read_text(pane.current_path, entry.name)
         except Exception as exc:
