@@ -28,6 +28,7 @@ import os
 
 import pytest
 
+from mtools_gui import install_helper
 from mtools_gui.constants import HELPER_INSTALL_PATH
 
 
@@ -41,3 +42,7 @@ def _pretend_helper_is_installed(monkeypatch):
         return real_exists(path)
 
     monkeypatch.setattr(os.path, "exists", fake_exists)
+    # Same reasoning for an *outdated* installed helper (e.g. on a dev
+    # machine with an older copy installed): the update dialog would block
+    # just the same. test_install_button.py exercises it explicitly.
+    monkeypatch.setattr(install_helper, "installed_helper_is_outdated", lambda: False)

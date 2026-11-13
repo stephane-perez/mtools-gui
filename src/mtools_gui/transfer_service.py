@@ -249,40 +249,58 @@ class TransferService(QObject):
         produced PHOTOS/PHOTOS/* nested alongside PHOTOS's old contents
         instead of replacing them.
 
-        Renaming each existing entry to a backup name (rather than
-        deleting it outright) makes this recoverable: if func() then
-        fails - a flaky USB device disconnecting mid-copy, for instance -
-        the user would otherwise lose their originals with nothing to
-        show for it. On failure, any partial result left under a target
-        name is cleared and its backup is renamed back; on success, every
-        backup is discarded.
+        Each existing entry is renamed to a backup name rather than
+        deleted outright, so nothing is lost if anything goes wrong. The
+        whole sequence is one transaction:
+          1. back up each existing entry, recording exactly which renames
+             really happened (a failure on the 3rd of 5 leaves only 2 to
+             undo - and the 3rd's original untouched);
+          2. run func;
+          3. only once func succeeded, delete the backups.
+        If step 1 or 2 fails, whatever func left under a target name is
+        removed and only the backups actually made are renamed back, then
+        checked against a fresh listing. A backup that can't be restored
+        is reported by name instead of being silently left behind, and so
+        is a backup that can't be deleted after a successful copy.
 
-        Unlike the batched copy/move itself, this doesn't get a batch
-        speedup: mtools has no multi-file rename, so each conflicting
-        entry still costs one rename (and maybe one delete) call of its
-        own. That's fine - conflicts are the uncommon case; this exists
-        to keep them safe, not fast."""
+        Backup names are 8.3-safe ("~MTG0001.BAK"): a long name would be
+        converted on a DOS drive in 8.3 mode, and restoring would then
+        look for a file that no longer exists under the expected name.
+
+        mtools has no multi-file rename, so each conflicting entry costs
+        one rename (and maybe one delete) call of its own. That's fine -
+        conflicts are the uncommon case; this exists to keep them safe,
+        not fast."""
         if not replacements:
             return func
 
-        backups = [(r, f".mtools_gui_bak_{r.name}") for r in replacements]
-
         def wrapped():
-            for r, backup_name in backups:
-                dst_backend.rename(dst_dir, r.name, backup_name)
+            backups = list(zip(replacements, _backup_names(dst_backend, dst_dir, len(replacements))))
+            done: list[tuple[Entry, str]] = []
+            func_started = False
             try:
+                for entry, backup_name in backups:
+                    dst_backend.rename(dst_dir, entry.name, backup_name)
+                    done.append((entry, backup_name))
+                func_started = True
                 func()
-            except Exception:
-                for r, backup_name in backups:
-                    try:
-                        dst_backend.delete(dst_dir, r.name, r.is_dir)
-                    except Exception:
-                        pass  # nothing partial was left under the target name - fine
-                    dst_backend.rename(dst_dir, backup_name, r.name)
+            except Exception as exc:
+                failed = _restore_backups(dst_backend, dst_dir, done, func_started)
+                if failed:
+                    raise MtoolsClientError(
+                        _("replace_restore_failed", error=exc, items=_describe_backups(failed))
+                    ) from exc
                 raise
-            else:
-                for r, backup_name in backups:
-                    dst_backend.delete(dst_dir, backup_name, r.is_dir)
+            leftover = []
+            for entry, backup_name in done:
+                try:
+                    dst_backend.delete(dst_dir, backup_name, entry.is_dir)
+                except Exception:
+                    leftover.append((entry, backup_name))
+            if leftover:
+                raise MtoolsClientError(
+                    _("replace_cleanup_failed", items=_describe_backups(leftover))
+                )
 
         return wrapped
 
@@ -334,3 +352,57 @@ class TransferService(QObject):
             src_backend.copy_out_many(src_dir, names, dst_dir)
         else:
             raise TypeError(_("err_unknown_pane_combination_move"))
+
+
+# -- backup helpers for TransferService._with_replace_many -------------------
+
+_BACKUP_TEMPLATE = "~MTG{:04d}.BAK"
+
+
+def _backup_names(backend: Backend, directory: str, count: int) -> list[str]:
+    """`count` backup names not already used in `directory` (compared
+    case-insensitively, as on a DOS drive)."""
+    try:
+        taken = {e.name.upper() for e in backend.list_dir(directory)}
+    except Exception:
+        taken = set()  # a collision would only make the rename fail - handled
+    names = []
+    i = 1
+    while len(names) < count:
+        candidate = _BACKUP_TEMPLATE.format(i)
+        if candidate.upper() not in taken:
+            names.append(candidate)
+        i += 1
+    return names
+
+
+def _restore_backups(
+    backend: Backend, directory: str, done: list[tuple[Entry, str]], func_started: bool
+) -> list[tuple[Entry, str]]:
+    """Undo the backups actually made, most recent first. Returns those
+    that couldn't be put back."""
+    failed = []
+    for entry, backup_name in reversed(done):
+        if func_started:
+            try:
+                backend.delete(directory, entry.name, entry.is_dir)
+            except Exception:
+                pass  # nothing partial was left under the target name - fine
+        try:
+            backend.rename(directory, backup_name, entry.name)
+        except Exception:
+            failed.append((entry, backup_name))
+    # Trust, but verify: every restored name must really be back.
+    restored = [(e, b) for e, b in done if (e, b) not in failed]
+    if restored:
+        try:
+            present = {e.name.upper() for e in backend.list_dir(directory)}
+        except Exception:
+            present = None  # can't check - the renames themselves succeeded
+        if present is not None:
+            failed += [(e, b) for e, b in restored if e.name.upper() not in present]
+    return failed
+
+
+def _describe_backups(pairs: list[tuple[Entry, str]]) -> str:
+    return ", ".join(f"{entry.name} -> {backup}" for entry, backup in pairs)

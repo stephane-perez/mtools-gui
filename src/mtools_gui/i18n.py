@@ -182,6 +182,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         ),
     },
     "install_now_button": {"fr": "Installer maintenant", "en": "Install now"},
+    "dialog_update_required_title": {
+        "fr": "Mise à jour du programme complémentaire",
+        "en": "Companion program update",
+    },
+    "dialog_update_required_text": {
+        "fr": (
+            "Le programme complémentaire root installé sur cette machine "
+            "date d'une version précédente de mtools_gui. Cette version-ci "
+            "en apporte une version plus sûre : mettez-le à jour pour en "
+            "profiter (et pour éviter tout comportement incohérent).\n\n"
+            "Cliquez sur \"Mettre à jour\" (demandera votre mot de passe), "
+            "ou lancez une fois dans un terminal :\n"
+            "  {command}"
+        ),
+        "en": (
+            "The root companion program installed on this machine comes "
+            "from an earlier version of mtools_gui. This version ships a "
+            "safer one: update it to benefit from it (and to avoid "
+            "inconsistent behaviour).\n\n"
+            "Click \"Update\" (will ask for your password), or run this "
+            "once in a terminal:\n"
+            "  {command}"
+        ),
+    },
+    "update_now_button": {"fr": "Mettre à jour", "en": "Update"},
     "install_later_button": {"fr": "Plus tard", "en": "Later"},
     "install_success_title": {"fr": "Installation réussie", "en": "Installation succeeded"},
     "install_success_text": {
@@ -260,6 +285,27 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": (
             "{name} was copied, but the original could not be removed "
             "from the source: {error}. Both copies now exist."
+        ),
+    },
+    "replace_restore_failed": {
+        "fr": (
+            "{error}\n\nAttention : certains éléments remplacés n'ont pas pu être "
+            "remis en place. Leurs originaux sont intacts, sous ces noms de "
+            "sauvegarde : {items}"
+        ),
+        "en": (
+            "{error}\n\nWarning: some replaced items could not be put back. "
+            "Their originals are intact, under these backup names: {items}"
+        ),
+    },
+    "replace_cleanup_failed": {
+        "fr": (
+            "La copie est terminée, mais les anciennes versions remplacées n'ont "
+            "pas pu être supprimées ; vous pouvez les effacer vous-même : {items}"
+        ),
+        "en": (
+            "The copy completed, but the replaced old versions could not be "
+            "deleted; you can remove them yourself: {items}"
         ),
     },
     "move_copied_but_source_delete_failed_many": {

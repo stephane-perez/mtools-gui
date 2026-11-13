@@ -97,7 +97,7 @@ def test_extra_allowed_roots_scopes_media_to_the_given_username(helper):
     roots = helper._extra_allowed_roots("testuser")
     assert "/media/testuser" in roots
     assert "/run/media/testuser" in roots
-    assert "/mnt" in roots
+    assert "/mnt" not in roots  # /mnt is checked per path, see below
 
 
 def test_extra_allowed_roots_excludes_another_users_media(helper):
@@ -106,9 +106,47 @@ def test_extra_allowed_roots_excludes_another_users_media(helper):
     assert helper.is_allowed_unix_path("/media/testuser/SDCARD", None, roots) is True
 
 
-def test_extra_allowed_roots_without_username_still_allows_mnt(helper):
-    roots = helper._extra_allowed_roots(None)
-    assert roots == ("/mnt",)
+def test_extra_allowed_roots_without_username_is_empty(helper):
+    assert helper._extra_allowed_roots(None) == ()
+
+
+# -- /mnt: only removable volumes ----------------------------------------------
+
+
+def test_mnt_path_on_removable_volume_is_allowed(helper):
+    assert helper.is_allowed_unix_path(
+        "/mnt/sdcard/GAMES", None, (), removable_volume_fn=lambda p: True
+    )
+
+
+def test_mnt_path_on_internal_disk_is_rejected(helper):
+    assert not helper.is_allowed_unix_path(
+        "/mnt/backup", None, (), removable_volume_fn=lambda p: False
+    )
+
+
+def test_mnt_lookalike_prefix_is_not_treated_as_mnt(helper):
+    checked = []
+    helper.is_allowed_unix_path("/mntx/a", None, (), removable_volume_fn=checked.append)
+    assert checked == []
+
+
+def test_is_on_removable_volume_rejects_paths_not_on_a_block_device(helper):
+    # /proc is a pseudo filesystem: no /sys/dev/block entry for its st_dev.
+    assert helper._is_on_removable_volume("/proc") is False
+    assert helper._is_on_removable_volume("/nonexistent/xyz") is False
+
+
+def test_is_on_removable_volume_needs_lsblk_and_sysfs_to_agree(helper, monkeypatch, tmp_path):
+    sys_dev = tmp_path / "sde1"
+    sys_dev.mkdir()
+    monkeypatch.setattr(helper.os.path, "realpath", lambda p: str(sys_dev))
+    monkeypatch.setattr(helper, "_lsblk_row", lambda d: {"rm": True, "pkname": "sde"})
+    monkeypatch.setattr(helper, "_sysfs_removable", lambda name: name == "sde")
+    assert helper._is_on_removable_volume(str(tmp_path)) is True
+
+    monkeypatch.setattr(helper, "_lsblk_row", lambda d: {"rm": False, "pkname": "sde"})
+    assert helper._is_on_removable_volume(str(tmp_path)) is False
 
 
 # -- validate_args -----------------------------------------------------------
@@ -265,7 +303,7 @@ def test_validate_device_rejects_known_non_dos_fstype(helper, monkeypatch):
         helper.validate_device("/dev/sde1")
 
 
-# -- ownership handback (DOS -> local copies must not stay root-owned) ------
+# -- invoking identity ----------------------------------------------------------
 
 
 def test_invoking_identity_none_without_pkexec_uid(helper, monkeypatch):
@@ -273,89 +311,14 @@ def test_invoking_identity_none_without_pkexec_uid(helper, monkeypatch):
     assert helper._invoking_identity() is None
 
 
-def test_invoking_identity_resolves_uid_and_gid(helper, monkeypatch):
+def test_invoking_identity_resolves_uid_gid_and_name(helper, monkeypatch):
     monkeypatch.setenv("PKEXEC_UID", "1000")
     monkeypatch.setattr(
-        helper.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir="/home/testuser")
+        helper.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="testuser", pw_dir="/home/testuser"),
     )
-    assert helper._invoking_identity() == (1000, 1000)
-
-
-def test_chown_recursive_covers_every_file_and_subdir(helper, tmp_path, monkeypatch):
-    root = tmp_path / "copied_folder"
-    (root / "sub").mkdir(parents=True)
-    (root / "a.txt").write_text("x")
-    (root / "sub" / "b.txt").write_text("y")
-
-    chowned = []
-    monkeypatch.setattr(helper.os, "chown", lambda path, uid, gid, **kw: chowned.append(path))
-
-    helper._chown_recursive(str(root), 1000, 1000)
-
-    assert str(root) in chowned
-    assert str(root / "a.txt") in chowned
-    assert str(root / "sub") in chowned
-    assert str(root / "sub" / "b.txt") in chowned
-
-
-def test_chown_recursive_tolerates_a_missing_path(helper):
-    # Must not raise even if the path vanished or chown is refused -
-    # ownership handback is best-effort, never fatal to the operation
-    # that already succeeded.
-    helper._chown_recursive("/nonexistent/path/xyz", 1000, 1000)
-
-
-def test_hand_back_ownership_only_touches_unix_side_paths(helper, tmp_path, monkeypatch):
-    dest = tmp_path / "DEMOS"
-    dest.mkdir()
-    (dest / "file.txt").write_text("x")
-
-    monkeypatch.setattr(helper, "_invoking_identity", lambda: (1000, 1000))
-    chowned = []
-    monkeypatch.setattr(helper, "_chown_recursive", lambda path, uid, gid: chowned.append(path))
-
-    helper._hand_back_ownership(
-        "mcopy", ["::/DEMOS", str(dest)], home_dir=str(tmp_path), extra_roots=()
-    )
-
-    assert chowned == [str(dest)]
-
-
-def test_hand_back_ownership_skips_a_path_that_no_longer_validates(helper, tmp_path, monkeypatch):
-    # Re-validation immediately before chown is the TOCTOU-shrinking check
-    # from the security review: if the path no longer resolves under an
-    # allowed root (home dir or scoped media root), skip the chown rather
-    # than trusting the validation done before mcopy ran.
-    dest = tmp_path / "DEMOS"
-    dest.mkdir()
-
-    monkeypatch.setattr(helper, "_invoking_identity", lambda: (1000, 1000))
-    chowned = []
-    monkeypatch.setattr(helper, "_chown_recursive", lambda path, uid, gid: chowned.append(path))
-
-    helper._hand_back_ownership(
-        "mcopy", ["::/DEMOS", str(dest)], home_dir=None, extra_roots=()
-    )
-
-    assert chowned == []
-
-
-def test_hand_back_ownership_is_noop_for_non_mcopy_ops(helper, monkeypatch):
-    calls = []
-    monkeypatch.setattr(helper, "_invoking_identity", lambda: (1000, 1000))
-    monkeypatch.setattr(helper, "_chown_recursive", lambda *a: calls.append(a))
-    helper._hand_back_ownership("mdir", ["::/DEMOS"])
-    assert calls == []
-
-
-def test_hand_back_ownership_is_noop_without_pkexec_identity(helper, tmp_path, monkeypatch):
-    dest = tmp_path / "file.txt"
-    dest.write_text("x")
-    monkeypatch.setattr(helper, "_invoking_identity", lambda: None)
-    calls = []
-    monkeypatch.setattr(helper, "_chown_recursive", lambda *a: calls.append(a))
-    helper._hand_back_ownership("mcopy", [str(dest)])
-    assert calls == []
+    assert helper._invoking_identity() == (1000, 1000, "testuser")
 
 
 # -- mcopy must recurse into subdirectories (-s) -----------------------------
@@ -365,7 +328,7 @@ def _stub_validated_device(helper, monkeypatch, device="/dev/sde1"):
     monkeypatch.setattr(helper, "validate_device", lambda d: device)
 
 
-def test_mcopy_command_includes_recursive_flag(helper, monkeypatch, tmp_path):
+def test_mcopy_command_includes_recursive_flag(helper, monkeypatch):
     _stub_validated_device(helper, monkeypatch)
     monkeypatch.setattr(helper, "validate_args", lambda op, args, **kwargs: args)
     captured = {}
@@ -375,11 +338,10 @@ def test_mcopy_command_includes_recursive_flag(helper, monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(helper.subprocess, "run", fake_run)
-    monkeypatch.setattr(helper, "_hand_back_ownership", lambda *a, **k: None)
 
-    helper.main(["mtools-gui-helper", "mcopy", "/dev/sde1", "::/DEMOS", str(tmp_path)])
+    helper.main(["mtools-gui-helper", "mcopy", "/dev/sde1", "::/DEMOS", "::/BACKUP"])
 
-    assert captured["command"] == ["/usr/bin/mcopy", "-i", "/dev/sde1", "-s", "::/DEMOS", str(tmp_path)]
+    assert captured["command"] == ["/usr/bin/mcopy", "-i", "/dev/sde1", "-s", "::/DEMOS", "::/BACKUP"]
 
 
 def test_non_mcopy_command_has_no_recursive_flag(helper, monkeypatch):

@@ -7,6 +7,45 @@ this project follows [Semantic Versioning](https://semver.org/).
 Versions before this file existed (0.1.0 - 0.4.1) were reconstructed
 from the git history.
 
+## [Unreleased]
+
+### Security
+
+- The privileged helper no longer reads or writes any local (Unix-side)
+  path as root, closing the window between validating a path and root
+  opening it (TOCTOU) in which a path component could be swapped for a
+  symlink to, e.g., `/etc/shadow`. mcopy now only works on a private
+  staging directory created by root, and the local side of the copy is
+  done by a child process running as the invoking user, the two
+  exchanging a tar stream that root checks (plain files and folders
+  only, under the expected names). Copied files are created owned by the
+  user directly: the recursive `chown` by root is gone.
+- `/mnt` is no longer trusted as a whole: a path there is accepted only
+  if it lives on a removable block device (lsblk and sysfs must agree).
+- The app detects an installed helper that differs from the one it ships
+  with and offers to update it (the helper is a copy in
+  `/usr/local/libexec`: upgrading the app alone never updated it).
+
+### Fixed
+
+- Replacing existing files: the backup step is now part of the
+  rollback. If backing up the 3rd of 5 conflicting entries failed, the
+  first 2 used to stay renamed with nothing restored; now exactly the
+  backups actually made are put back (and checked), a backup that can't
+  be restored or deleted is reported by name, and backups are only
+  deleted once the copy has succeeded.
+- In 8.3 mode, replacing existing files on a DOS drive or image failed:
+  the backup name (`.mtools_gui_bak_<name>`) was itself converted to 8.3
+  (`MTOOLS_G.TXT`), so it couldn't be found again, and a second conflict
+  collided with the first. Backups are now named `~MTG0001.BAK`, ...
+- After a failed operation, both panes are refreshed to show what is
+  really there.
+
+### Changed
+
+- The file preview is limited to 64 KiB, with a message for larger
+  files.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added
