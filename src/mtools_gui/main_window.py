@@ -358,6 +358,8 @@ class MainWindow(QMainWindow):
     def mount_image(self, path: str, initial_path: str = "/") -> bool:
         """Mount a raw FAT image or an Atari MSA image in the right pane."""
         path = os.path.abspath(path)
+        if path == self._mounted_image:
+            return True
         backend: DosBackend
         try:
             if Path(path).suffix.lower() == ".msa":
