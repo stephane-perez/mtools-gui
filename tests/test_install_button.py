@@ -142,3 +142,77 @@ def test_install_button_in_dialog_triggers_install(window, monkeypatch, no_real_
     window._check_helper_installed()
 
     assert called == [True]
+
+
+def _fake_box_class(shown):
+    class FakeBox:
+        AcceptRole = QMessageBox.AcceptRole
+        RejectRole = QMessageBox.RejectRole
+        Information = QMessageBox.Information
+
+        def __init__(self, *a, **k):
+            self._buttons = {}
+
+        def setIcon(self, *a):
+            pass
+
+        def setWindowTitle(self, title):
+            shown.append(title)
+
+        def setText(self, *a):
+            pass
+
+        def addButton(self, text, role):
+            shown.append(text)
+            btn = object()
+            self._buttons[role] = btn
+            return btn
+
+        def exec(self):
+            pass
+
+        def clickedButton(self):
+            return self._buttons[QMessageBox.AcceptRole]
+
+    return FakeBox
+
+
+def test_outdated_helper_offers_an_update(window, monkeypatch):
+    from mtools_gui import install_helper
+    from mtools_gui.i18n import _
+
+    called, shown = [], []
+    monkeypatch.setattr(window, "_install_helper_now", lambda: called.append(True))
+    monkeypatch.setattr(install_helper, "installed_helper_is_outdated", lambda: True)
+    monkeypatch.setattr(mw, "QMessageBox", _fake_box_class(shown))
+
+    window._check_helper_installed()
+
+    assert _("update_now_button") in shown
+    assert called == [True]
+
+
+def test_up_to_date_helper_shows_nothing(window, monkeypatch):
+    shown = []
+    monkeypatch.setattr(mw, "QMessageBox", _fake_box_class(shown))
+    window._check_helper_installed()  # conftest: installed and up to date
+    assert shown == []
+
+
+def test_installed_helper_is_outdated_compares_with_the_bundled_copy(monkeypatch, tmp_path):
+    import importlib.resources
+
+    from mtools_gui import install_helper
+
+    bundled = (importlib.resources.files("mtools_gui") / "system_files" / "mtools-gui-helper").read_bytes()
+    installed = tmp_path / "helper"
+    # conftest's autouse fixture stubs this very function out: undo it to
+    # test the real one.
+    monkeypatch.undo()
+    monkeypatch.setattr(install_helper, "HELPER_INSTALL_PATH", str(installed))
+
+    assert install_helper.installed_helper_is_outdated() is False  # not installed: nothing to compare
+    installed.write_bytes(bundled)
+    assert install_helper.installed_helper_is_outdated() is False
+    installed.write_bytes(bundled + b"\n# older version\n")
+    assert install_helper.installed_helper_is_outdated() is True

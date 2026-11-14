@@ -174,8 +174,17 @@ MTOOLS_GUI_LANG=en mtools-gui
 See the comments in `src/mtools_gui/system_files/mtools-gui-helper`: the
 helper independently validates (via `lsblk` AND `/sys/block/*/removable`)
 that the target device is actually removable before any operation, and
-confines any Unix path passed to `mcopy` to the user's home directory or
-the usual removable-media mount roots.
+confines any Unix path passed to `mcopy` to the user's home directory,
+the user's own `/media` and `/run/media` mount roots, or a removable
+volume mounted under `/mnt`.
+
+On top of that, the helper never reads or writes a local file as root:
+mtools works on a private staging directory, and the local side of a
+copy is done by a process running as you, so it can only touch files you
+could touch anyway.
+
+The helper is installed as a copy, so after upgrading mtools_gui the app
+offers to update it when it differs from the new version's.
 
 ## Uninstalling the privileged helper
 

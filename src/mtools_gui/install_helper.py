@@ -59,6 +59,22 @@ def _install() -> None:
     print(_("install_verify_hint", helper_path=HELPER_INSTALL_PATH))
 
 
+def installed_helper_is_outdated() -> bool:
+    """True if a helper is installed but differs from the one shipped with
+    this version of the app. The helper is a *copy* in
+    /usr/local/libexec, so upgrading the app alone never updates it - a
+    security fix in the helper would otherwise silently never reach the
+    machine. False if either file can't be read (nothing to compare)."""
+    system_files = importlib.resources.files("mtools_gui") / "system_files"
+    try:
+        bundled = (system_files / HELPER_SOURCE_NAME).read_bytes()
+        with open(HELPER_INSTALL_PATH, "rb") as f:
+            installed = f.read()
+    except OSError:
+        return False
+    return installed != bundled
+
+
 def _uninstall() -> None:
     for path in (HELPER_INSTALL_PATH, POLKIT_RULES_INSTALL_PATH):
         if os.path.exists(path):

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, device_discovery, mtools_client
+from . import __version__, device_discovery, install_helper, mtools_client
 from .backends.dos_backend import DosBackend
 from .backends.local_backend import LocalBackend
 from .constants import HELPER_INSTALL_PATH, INSTALL_HELPER_COMMAND
@@ -208,14 +208,23 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Tab), self, activated=self._toggle_active_pane)
 
     def _check_helper_installed(self) -> None:
-        if os.path.exists(HELPER_INSTALL_PATH):
+        if not os.path.exists(HELPER_INSTALL_PATH):
+            logger.warning("Privileged helper not installed (%s)", HELPER_INSTALL_PATH)
+            title = _("dialog_install_required_title")
+            text = _("dialog_install_required_text", command=INSTALL_HELPER_COMMAND)
+            button = _("install_now_button")
+        elif install_helper.installed_helper_is_outdated():
+            logger.warning("Privileged helper outdated (%s)", HELPER_INSTALL_PATH)
+            title = _("dialog_update_required_title")
+            text = _("dialog_update_required_text", command=INSTALL_HELPER_COMMAND)
+            button = _("update_now_button")
+        else:
             return
-        logger.warning("Privileged helper not installed (%s)", HELPER_INSTALL_PATH)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
-        box.setWindowTitle(_("dialog_install_required_title"))
-        box.setText(_("dialog_install_required_text", command=INSTALL_HELPER_COMMAND))
-        install_button = box.addButton(_("install_now_button"), QMessageBox.AcceptRole)
+        box.setWindowTitle(title)
+        box.setText(text)
+        install_button = box.addButton(button, QMessageBox.AcceptRole)
         box.addButton(_("install_later_button"), QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() is install_button:
@@ -595,6 +604,11 @@ class MainWindow(QMainWindow):
         logger.error("%s", message)
         if description is not None:
             self._remove_pending(description)
+            # A failed operation may still have changed things (a partial
+            # copy, backups left behind - see _with_replace_many): show
+            # the real state rather than a stale listing.
+            self.left_pane.refresh()
+            self.right_pane.refresh()
         self.statusBar().showMessage(message, 8000)
         QMessageBox.warning(self, _("dialog_error_title"), message)
 

@@ -28,25 +28,40 @@ caller:
     mtools path - never a bare Unix path.
   - mcopy is the one command that legitimately takes a real Unix-side
     path (to copy to/from the local filesystem). That path is confined to
-    the invoking user's home directory or common removable-media mount
-    roots, so this helper can never be turned into an arbitrary-file
-    root read/write primitive by an unprivileged caller.
+    the invoking user's home directory, their own /media and /run/media
+    mount roots, or a removable volume mounted under /mnt.
 
-Ownership handback: since mcopy runs as root (via pkexec), any file or
-directory it creates on the Unix side (a DOS -> local copy) would
-otherwise end up owned by root, leaving the invoking user unable to even
-delete their own copied files. After a successful mcopy, every Unix-side
-argument path is chown'd back to the invoking user (from PKEXEC_UID),
-recursively for directories - see _chown_recursive/_hand_back_ownership.
+Unix-side files are never read or written as root. Validating a path
+and then letting root open it leaves a window (TOCTOU) in which the
+caller could swap a path component for a symlink to, say, /etc/shadow.
+So mcopy itself only ever sees a private staging directory that root
+created and nobody else can enter (mkdtemp under /var/tmp, mode 0700),
+and the Unix side of the transfer is done by a child process that has
+dropped to the invoking user's uid/gid/groups (from PKEXEC_UID) - it can
+only read or write what that user could anyway. The two talk through a
+tar stream on a pipe:
+  - local -> DOS: the user-side child packs the sources and writes the
+    tar stream; root unpacks it into staging, accepting only plain files
+    and directories under the expected names (no links, devices, absolute
+    paths or ".."), then runs mcopy from staging onto the device.
+  - DOS -> local: root runs mcopy from the device into staging, packs it
+    and streams it to the user-side child, which unpacks it into the
+    destination. Files therefore come out owned by the user directly,
+    with no chown by root afterwards.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import posixpath
 import pwd
+import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
 
 ALLOWED_OPS = {
     "mdir": "/usr/bin/mdir",
@@ -78,7 +93,18 @@ NON_DOS_FSTYPES = {
     "zfs_member", "linux_raid_member", "lvm2_member", "crypto_luks",
 }
 
-EXTRA_ALLOWED_ROOTS = ("/media", "/run/media", "/mnt")
+EXTRA_ALLOWED_ROOTS = ("/media", "/run/media")
+
+# /mnt has no per-user convention (a root-owned, shared mount point), so
+# instead of trusting everything below it, a path there is only accepted
+# if it actually lives on a removable block device - see
+# _is_on_removable_volume.
+MNT_ROOT = "/mnt"
+
+# Where root's private staging directories are created: a sticky
+# directory (nobody can rename or remove root's entry in it) on disk
+# rather than tmpfs, since a copy can be as large as the card.
+STAGING_PARENT = "/var/tmp"
 
 HELPER_ENV = {
     "LC_ALL": "C",
@@ -223,9 +249,9 @@ def _invoking_home_dir() -> str | None:
     return pw.pw_dir if pw else None
 
 
-def _invoking_identity() -> tuple[int, int] | None:
+def _invoking_identity() -> tuple[int, int, str] | None:
     pw = _invoking_pwd_entry()
-    return (pw.pw_uid, pw.pw_gid) if pw else None
+    return (pw.pw_uid, pw.pw_gid, pw.pw_name) if pw else None
 
 
 def _invoking_username() -> str | None:
@@ -237,74 +263,54 @@ def _extra_allowed_roots(username: str | None) -> tuple[str, ...]:
     """/media and /run/media follow the desktop-automount convention of
     one subdirectory per user; scoping them to the invoking user's own
     name stops this helper from touching another local user's already-
-    mounted media. /mnt has no such per-user convention on a personal
-    machine (a root-owned mount point), so it stays shared."""
-    roots = ["/mnt"]
-    if username:
-        roots.append(f"/media/{username}")
-        roots.append(f"/run/media/{username}")
-    return tuple(roots)
+    mounted media. /mnt is handled separately (see MNT_ROOT)."""
+    if not username:
+        return ()
+    return (f"/media/{username}", f"/run/media/{username}")
 
 
-def _chown_recursive(path: str, uid: int, gid: int) -> None:
+def _is_on_removable_volume(path: str) -> bool:
+    """True if `path` is stored on a removable block device (lsblk AND
+    sysfs agree, as for the target device). Used for /mnt, where a
+    removable volume mounted by hand is legitimate but the internal
+    disk, a network share or anything else is not."""
     try:
-        os.chown(path, uid, gid, follow_symlinks=False)
+        st = os.stat(path)
     except OSError:
-        return
-    if os.path.isdir(path) and not os.path.islink(path):
-        for root, dirs, files in os.walk(path):
-            for name in dirs + files:
-                try:
-                    os.chown(os.path.join(root, name), uid, gid, follow_symlinks=False)
-                except OSError:
-                    pass
+        return False
+    major, minor = os.major(st.st_dev), os.minor(st.st_dev)
+    sys_dev = os.path.realpath(f"/sys/dev/block/{major}:{minor}")
+    if not os.path.isdir(sys_dev):
+        return False  # not backed by a block device (tmpfs, NFS, overlay...)
+    name = os.path.basename(sys_dev)
+    try:
+        row = _lsblk_row(f"/dev/{name}")
+    except ValidationError:
+        return False
+    # An unpartitioned medium (a "superfloppy" USB stick) is its own disk:
+    # it has no parent, so sysfs is checked on the device itself.
+    return row.get("rm") is True and _sysfs_removable(row.get("pkname") or name)
 
 
-def _hand_back_ownership(
-    op: str,
-    resolved_args: list[str],
-    home_dir: str | None = None,
-    extra_roots: tuple[str, ...] | None = None,
-) -> None:
-    """After a successful mcopy, any Unix-side path it touched was
-    created/written as root - give it back to the invoking user so they
-    can actually manage their own copied files."""
-    if op != "mcopy":
-        return
-    identity = _invoking_identity()
-    if identity is None:
-        return
-    if home_dir is None:
-        home_dir = _invoking_home_dir()
-    if extra_roots is None:
-        extra_roots = _extra_allowed_roots(_invoking_username())
-    uid, gid = identity
-    for arg in resolved_args:
-        if arg.startswith("::"):
-            continue
-        # Re-check the path is still one we're allowed to touch right
-        # before chown-ing it: the window between the initial
-        # validate_args() call (before mcopy ran) and this point (after
-        # it succeeded) is the TOCTOU gap the external security review
-        # flagged as its top concern - this doesn't close it entirely
-        # (a component could still be swapped between this check and the
-        # chown itself), but shrinks it from "the whole mcopy duration"
-        # to "a few syscalls".
-        if not is_allowed_unix_path(arg, home_dir, extra_roots):
-            continue
-        if os.path.exists(arg):
-            _chown_recursive(arg, uid, gid)
+def _is_under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + os.sep)
 
 
-def is_allowed_unix_path(path: str, home_dir: str | None, extra_roots=EXTRA_ALLOWED_ROOTS) -> bool:
+def is_allowed_unix_path(
+    path: str,
+    home_dir: str | None,
+    extra_roots=EXTRA_ALLOWED_ROOTS,
+    removable_volume_fn=None,
+) -> bool:
     resolved = os.path.realpath(path)
-    if home_dir:
-        home_resolved = os.path.realpath(home_dir)
-        if resolved == home_resolved or resolved.startswith(home_resolved + os.sep):
-            return True
-    for root in extra_roots:
-        if resolved == root or resolved.startswith(root + os.sep):
-            return True
+    if home_dir and _is_under(resolved, os.path.realpath(home_dir)):
+        return True
+    if any(_is_under(resolved, root) for root in extra_roots):
+        return True
+    if _is_under(resolved, MNT_ROOT):
+        # Same late-binding trick as is_removable's sysfs_read_fn.
+        check = removable_volume_fn or _is_on_removable_volume
+        return check(resolved)
     return False
 
 
@@ -341,6 +347,226 @@ def validate_args(
     return resolved_args
 
 
+# -- Unix-side transfers, as the invoking user ---------------------------------
+
+class TransferError(Exception):
+    pass
+
+
+# Both scripts run in a child process that has already dropped to the
+# invoking user (see _user_preexec), with `python3 -I` (isolated: ignores
+# PYTHON* variables, the user's site-packages and the current directory).
+
+# local -> DOS: pack the given sources into a tar stream on stdout.
+# Symlinks are followed (as mcopy itself would), with the user's rights.
+_PACK_SCRIPT = """
+import os, sys, tarfile
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|", dereference=True) as tar:
+    for src in sys.argv[1:]:
+        tar.add(src, arcname=os.path.basename(src.rstrip("/")))
+"""
+
+# DOS -> local: unpack the tar stream from stdin into the destination.
+# The stream comes from root's own staging directory, so it is trusted,
+# but members are still checked the same way as in _checked_members.
+_UNPACK_SCRIPT = """
+import os, posixpath, sys, tarfile
+dest = sys.argv[1]
+def members(tar):
+    for m in tar:
+        name = posixpath.normpath(m.name)
+        if not (m.isreg() or m.isdir()) or name.startswith(("/", "..")) or "/../" in "/" + name + "/":
+            sys.exit("unexpected entry in transfer: " + m.name)
+        yield m
+with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as tar:
+    kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+    tar.extractall(dest, members=members(tar), **kwargs)
+"""
+
+
+# Python >= 3.12 (and security backports) can additionally sanitize every
+# member; older interpreters rely on _checked_members alone.
+_TAR_FILTER = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+
+
+def _user_preexec(identity: tuple[int, int, str]):
+    uid, gid, username = identity
+
+    def drop() -> None:
+        # Order matters: supplementary groups and gid while still root,
+        # uid last (after setuid, nothing else can be changed back).
+        os.setgroups(os.getgrouplist(username, gid))
+        os.setgid(gid)
+        os.setuid(uid)
+
+    return drop
+
+
+def _user_env(home_dir: str | None) -> dict:
+    return {"LC_ALL": "C", "PATH": "/usr/bin:/bin", "HOME": home_dir or "/"}
+
+
+def _checked_members(tar, expected_top: set[str]):
+    """Members of a tar stream produced by the *unprivileged* side, about
+    to be extracted by root: plain files and directories only, under one
+    of the expected top-level names, nothing absolute or going up."""
+    for member in tar:
+        name = posixpath.normpath(member.name)
+        parts = name.split("/")
+        if (
+            not (member.isreg() or member.isdir())
+            or name.startswith("/")
+            or ".." in parts
+            or parts[0] not in expected_top
+        ):
+            raise TransferError(f"element inattendu dans le transfert : {member.name!r}")
+        # Root must not take ownership or mode bits (setuid...) from the
+        # stream: staging content is root's, plain permissions only.
+        member.uid = member.gid = 0
+        member.uname = member.gname = "root"
+        member.mode = 0o755 if member.isdir() else 0o644
+        yield member
+
+
+def _start_watchdog(proc, timeout: int, flag: dict) -> threading.Timer:
+    def kill() -> None:
+        flag["timed_out"] = True
+        proc.kill()
+
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _child_failure(proc, stderr_file) -> TransferError:
+    stderr_file.seek(0)
+    detail = stderr_file.read().decode("utf-8", "replace").strip().splitlines()
+    last = detail[-1] if detail else f"code {proc.returncode}"
+    return TransferError(f"transfert cote utilisateur en echec : {last}")
+
+
+def _pull_from_user(sources: list[str], staging: str, identity, home_dir, timeout: int) -> None:
+    """Have the user-side child pack `sources`, unpack them into staging."""
+    expected = {os.path.basename(s.rstrip("/")) for s in sources}
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", _PACK_SCRIPT, *sources],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=stderr_file,
+            preexec_fn=_user_preexec(identity),
+            env=_user_env(home_dir),
+            cwd="/",
+        )
+        flag = {}
+        timer = _start_watchdog(proc, timeout, flag)
+        try:
+            try:
+                with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
+                    tar.extractall(staging, members=_checked_members(tar, expected), **_TAR_FILTER)
+            except tarfile.TarError as exc:
+                if proc.wait() == 0 and not flag:
+                    raise TransferError(f"flux de transfert illisible : {exc}") from exc
+            finally:
+                proc.stdout.close()
+            proc.wait()
+        finally:
+            timer.cancel()
+        if flag:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        if proc.returncode != 0:
+            raise _child_failure(proc, stderr_file)
+
+
+def _push_to_user(staging: str, dest_dir: str, identity, home_dir, timeout: int) -> None:
+    """Pack staging (root's own private copy) and stream it to a
+    user-side child that unpacks it into dest_dir."""
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", _UNPACK_SCRIPT, dest_dir],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            preexec_fn=_user_preexec(identity),
+            env=_user_env(home_dir),
+            cwd="/",
+        )
+        flag = {}
+        timer = _start_watchdog(proc, timeout, flag)
+        try:
+            try:
+                with tarfile.open(fileobj=proc.stdin, mode="w|") as tar:
+                    for name in sorted(os.listdir(staging)):
+                        tar.add(os.path.join(staging, name), arcname=name)
+            except BrokenPipeError:
+                pass  # the child gave up early: its exit code says why
+            finally:
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+            proc.wait()
+        finally:
+            timer.cancel()
+        if flag:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        if proc.returncode != 0:
+            raise _child_failure(proc, stderr_file)
+
+
+def classify_mcopy(args: list[str]) -> str:
+    """'dos' (both sides on the device), 'to_dos' (Unix sources, DOS
+    target) or 'from_dos' (DOS sources, Unix target directory)."""
+    if len(args) < 2:
+        raise UsageError("mcopy attend au moins une source et une destination")
+    *sources, target = args
+    sources_dos = [s.startswith("::") for s in sources]
+    if target.startswith("::"):
+        if all(sources_dos):
+            return "dos"
+        if not any(sources_dos):
+            names = [os.path.basename(s.rstrip("/")) for s in sources]
+            if len(set(names)) != len(names) or not all(names):
+                raise ValidationError("sources locales en double ou sans nom")
+            return "to_dos"
+    elif all(sources_dos):
+        return "from_dos"
+    raise ValidationError("melange de sources locales et DOS dans un meme mcopy")
+
+
+def _run_mtools(command: list[str], timeout: int):
+    return subprocess.run(command, capture_output=True, text=True, env=HELPER_ENV, timeout=timeout)
+
+
+def run_mcopy_via_staging(
+    device: str, direction: str, args: list[str], identity, home_dir
+) -> subprocess.CompletedProcess:
+    """mcopy with the Unix side handled by the invoking user - see the
+    module docstring. Returns mcopy's CompletedProcess, or raises
+    TransferError / subprocess.TimeoutExpired."""
+    if identity is None:
+        raise ValidationError("utilisateur appelant inconnu (PKEXEC_UID absent)")
+    timeout = MTOOLS_COPY_TIMEOUT_SECONDS
+    staging = tempfile.mkdtemp(prefix="mtools-gui-", dir=STAGING_PARENT)
+    try:
+        *sources, target = args
+        if direction == "to_dos":
+            _pull_from_user(sources, staging, identity, home_dir, timeout)
+            staged = [os.path.join(staging, os.path.basename(s.rstrip("/"))) for s in sources]
+            return _run_mtools(
+                [ALLOWED_OPS["mcopy"], "-i", device, "-s", *staged, target], timeout
+            )
+        proc = _run_mtools(
+            [ALLOWED_OPS["mcopy"], "-i", device, "-s", *sources, staging + "/"], timeout
+        )
+        if proc.returncode == 0:
+            _push_to_user(staging, target, identity, home_dir, timeout)
+        return proc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print("USAGE_ERROR: usage: mtools-gui-helper <op> <device> [args...]", file=sys.stderr)
@@ -366,6 +592,38 @@ def main(argv: list[str]) -> int:
         return 3
 
     binary = ALLOWED_OPS[op]
+    timeout = MTOOLS_COPY_TIMEOUT_SECONDS if op == "mcopy" else MTOOLS_TIMEOUT_SECONDS
+
+    if op == "mcopy":
+        try:
+            direction = classify_mcopy(resolved_args)
+        except ValidationError as exc:
+            print(f"VALIDATION_ERROR: {exc}", file=sys.stderr)
+            return 2
+        except UsageError as exc:
+            print(f"USAGE_ERROR: {exc}", file=sys.stderr)
+            return 3
+        if direction != "dos":
+            try:
+                proc = run_mcopy_via_staging(
+                    resolved_device, direction, resolved_args, _invoking_identity(), home_dir
+                )
+            except ValidationError as exc:
+                print(f"VALIDATION_ERROR: {exc}", file=sys.stderr)
+                return 2
+            except TransferError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            except subprocess.TimeoutExpired:
+                print(f"TIMEOUT_ERROR: mcopy n'a pas repondu apres {timeout}s", file=sys.stderr)
+                return 4
+            except OSError as exc:
+                print(f"USAGE_ERROR: transfert impossible : {exc}", file=sys.stderr)
+                return 3
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            return 0 if proc.returncode == 0 else 1
+
     # mcopy only recurses into subdirectories with -s - without it, a
     # directory source silently copies just its top-level files and
     # drops every subdirectory (confirmed against a local test image: 4
@@ -375,7 +633,6 @@ def main(argv: list[str]) -> int:
     extra_flags = ["-s"] if op == "mcopy" else []
     command = [binary, "-i", resolved_device, *extra_flags, *resolved_args]
 
-    timeout = MTOOLS_COPY_TIMEOUT_SECONDS if op == "mcopy" else MTOOLS_TIMEOUT_SECONDS
     try:
         proc = subprocess.run(
             command, capture_output=True, text=True, env=HELPER_ENV, timeout=timeout
@@ -386,9 +643,6 @@ def main(argv: list[str]) -> int:
     except subprocess.TimeoutExpired:
         print(f"TIMEOUT_ERROR: {binary} n'a pas repondu apres {timeout}s", file=sys.stderr)
         return 4
-
-    if proc.returncode == 0:
-        _hand_back_ownership(op, resolved_args, home_dir=home_dir, extra_roots=extra_roots)
 
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)

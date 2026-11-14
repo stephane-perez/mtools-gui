@@ -40,10 +40,11 @@ def _entry(name, is_dir=False):
 # -- TransferService._with_replace_many --------------------------------------
 
 
-def _fake_backend(calls):
+def _fake_backend(calls, listing=()):
     return SimpleNamespace(
         rename=lambda directory, old, new: calls.append(("rename", directory, old, new)),
         delete=lambda directory, name, is_dir: calls.append(("delete", directory, name, is_dir)),
+        list_dir=lambda directory: [_entry(n) for n in listing],
     )
 
 
@@ -58,9 +59,9 @@ def test_with_replace_renames_existing_entry_out_of_the_way_first():
     wrapped()
 
     assert calls == [
-        ("rename", "/dest_dir", "PHOTOS", ".mtools_gui_bak_PHOTOS"),
+        ("rename", "/dest_dir", "PHOTOS", "~MTG0001.BAK"),
         ("copy",),
-        ("delete", "/dest_dir", ".mtools_gui_bak_PHOTOS", True),
+        ("delete", "/dest_dir", "~MTG0001.BAK", True),
     ]
 
 
@@ -76,11 +77,11 @@ def test_with_replace_renames_every_conflicting_entry_for_a_batch():
     wrapped()
 
     assert calls == [
-        ("rename", "/dest_dir", "PHOTOS", ".mtools_gui_bak_PHOTOS"),
-        ("rename", "/dest_dir", "VIDEOS", ".mtools_gui_bak_VIDEOS"),
+        ("rename", "/dest_dir", "PHOTOS", "~MTG0001.BAK"),
+        ("rename", "/dest_dir", "VIDEOS", "~MTG0002.BAK"),
         ("copy",),
-        ("delete", "/dest_dir", ".mtools_gui_bak_PHOTOS", True),
-        ("delete", "/dest_dir", ".mtools_gui_bak_VIDEOS", True),
+        ("delete", "/dest_dir", "~MTG0001.BAK", True),
+        ("delete", "/dest_dir", "~MTG0002.BAK", True),
     ]
 
 
@@ -94,15 +95,17 @@ def test_with_replace_restores_the_backup_if_the_copy_fails():
 
     wrapped = TransferService._with_replace_many(failing_copy, dst_backend, "/dest_dir", [existing])
 
-    with pytest.raises(OSError, match="card was pulled"):
+    with pytest.raises(Exception, match="card was pulled"):
         wrapped()
 
     # the failed attempt is cleaned up, then the original is restored -
-    # the user still has their original PHOTOS, not nothing
-    assert calls == [
-        ("rename", "/dest_dir", "PHOTOS", ".mtools_gui_bak_PHOTOS"),
+    # the user still has their original PHOTOS, not nothing (the fake
+    # listing is empty, so the post-restore check reports it missing:
+    # that's covered separately below)
+    assert calls[:3] == [
+        ("rename", "/dest_dir", "PHOTOS", "~MTG0001.BAK"),
         ("delete", "/dest_dir", "PHOTOS", True),
-        ("rename", "/dest_dir", ".mtools_gui_bak_PHOTOS", "PHOTOS"),
+        ("rename", "/dest_dir", "~MTG0001.BAK", "PHOTOS"),
     ]
 
 
@@ -239,3 +242,141 @@ def test_copying_a_folder_onto_an_existing_one_replaces_instead_of_nesting(
     # and not merged with the stale existing.txt
     assert result == {"f1.txt", "f2.txt"}
     assert not (dst_dir / "PHOTOS" / "PHOTOS").exists()
+
+
+# -- the backup phase is part of the transaction ------------------------------
+
+
+class _ScriptedBackend:
+    """In-memory directory whose rename/delete can be told to fail."""
+
+    def __init__(self, names, fail_rename=(), fail_delete=()):
+        self.names = set(names)
+        self.fail_rename = set(fail_rename)  # (old, new) pairs
+        self.fail_delete = set(fail_delete)
+        self.calls = []
+
+    def list_dir(self, directory):
+        return [_entry(n) for n in sorted(self.names)]
+
+    def rename(self, directory, old, new):
+        self.calls.append(("rename", old, new))
+        if (old, new) in self.fail_rename or old not in self.names or new in self.names:
+            raise OSError(f"cannot rename {old} -> {new}")
+        self.names.remove(old)
+        self.names.add(new)
+
+    def delete(self, directory, name, is_dir):
+        self.calls.append(("delete", name))
+        if name in self.fail_delete or name not in self.names:
+            raise OSError(f"cannot delete {name}")
+        self.names.remove(name)
+
+
+def test_backup_failure_midway_restores_only_what_was_renamed():
+    backend = _ScriptedBackend(
+        ["A.TXT", "B.TXT", "C.TXT"], fail_rename={("B.TXT", "~MTG0002.BAK")}
+    )
+    copied = []
+    wrapped = TransferService._with_replace_many(
+        lambda: copied.append(True), backend, "/", [_entry("A.TXT"), _entry("B.TXT"), _entry("C.TXT")]
+    )
+
+    with pytest.raises(OSError, match="B.TXT"):
+        wrapped()
+
+    assert copied == []  # never copied over a half-backed-up directory
+    assert backend.names == {"A.TXT", "B.TXT", "C.TXT"}  # back exactly as before
+    # C was never touched, and nothing was deleted
+    assert ("rename", "C.TXT", "~MTG0003.BAK") not in backend.calls
+    assert not any(c[0] == "delete" for c in backend.calls)
+
+
+def test_copy_failure_restores_every_backup_and_removes_partial_copies():
+    backend = _ScriptedBackend(["A.TXT", "B.TXT"])
+
+    def partial_copy():
+        backend.names.add("A.TXT")  # copied A, then the card was pulled
+        raise OSError("card pulled")
+
+    wrapped = TransferService._with_replace_many(
+        partial_copy, backend, "/", [_entry("A.TXT"), _entry("B.TXT")]
+    )
+    with pytest.raises(OSError, match="card pulled"):
+        wrapped()
+
+    assert backend.names == {"A.TXT", "B.TXT"}
+
+
+def test_a_backup_that_cannot_be_restored_is_reported_by_name():
+    from mtools_gui.mtools_client import MtoolsClientError
+
+    backend = _ScriptedBackend(["A.TXT"], fail_rename={("~MTG0001.BAK", "A.TXT")})
+
+    def failing_copy():
+        raise OSError("card pulled")
+
+    wrapped = TransferService._with_replace_many(failing_copy, backend, "/", [_entry("A.TXT")])
+    with pytest.raises(MtoolsClientError) as info:
+        wrapped()
+
+    assert "A.TXT -> ~MTG0001.BAK" in str(info.value)
+    assert "card pulled" in str(info.value)
+    assert "~MTG0001.BAK" in backend.names  # original kept, not deleted
+
+
+def test_backups_are_deleted_only_after_a_successful_copy_and_leftovers_reported():
+    from mtools_gui.mtools_client import MtoolsClientError
+
+    backend = _ScriptedBackend(["A.TXT"], fail_delete={"~MTG0001.BAK"})
+
+    def copy():
+        assert "~MTG0001.BAK" in backend.names  # backup still there during the copy
+        backend.names.add("A.TXT")
+
+    wrapped = TransferService._with_replace_many(copy, backend, "/", [_entry("A.TXT")])
+    with pytest.raises(MtoolsClientError, match="~MTG0001.BAK"):
+        wrapped()
+    assert "A.TXT" in backend.names
+
+
+def test_backup_names_avoid_existing_entries_and_survive_8_3_conversion():
+    from mtools_gui.dos_names import to_short_name
+    from mtools_gui.transfer_service import _backup_names
+
+    backend = _ScriptedBackend(["~mtg0001.bak", "A.TXT"])
+    names = _backup_names(backend, "/", 2)
+    assert names == ["~MTG0002.BAK", "~MTG0003.BAK"]
+    assert all(to_short_name(n) == n for n in names)
+
+
+def test_replace_on_an_8_3_dos_image_end_to_end(tmp_path):
+    # Regression: in 8.3 mode the old ".mtools_gui_bak_<name>" backup was
+    # converted on rename (to "MTOOLS_G.TXT"), so restoring or deleting it
+    # by its expected name failed, and a 2nd conflict collided with the 1st.
+    import shutil
+    import subprocess
+
+    if shutil.which("mformat") is None:
+        pytest.skip("mtools not installed")
+    from mtools_gui.backends.dos_backend import DosBackend
+
+    image = tmp_path / "a.st"
+    subprocess.run(["mformat", "-C", "-f", "720", "-i", str(image), "::"], check=True, capture_output=True)
+    src = tmp_path / "src"
+    src.mkdir()
+    for n in ("A.TXT", "B.TXT"):
+        (src / n).write_text("old " + n)
+    dos = DosBackend(str(image), short_names=True)
+    dos.copy_in_many([str(src / "A.TXT"), str(src / "B.TXT")], "/")
+    for n in ("A.TXT", "B.TXT"):
+        (src / n).write_text("new " + n)
+
+    existing = [e for e in dos.list_dir("/")]
+    wrapped = TransferService._with_replace_many(
+        lambda: dos.copy_in_many([str(src / "A.TXT"), str(src / "B.TXT")], "/"), dos, "/", existing
+    )
+    wrapped()
+
+    assert sorted(e.name for e in dos.list_dir("/")) == ["A.TXT", "B.TXT"]
+    assert dos.read_text("/", "A.TXT") == "new A.TXT"
