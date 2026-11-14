@@ -131,19 +131,22 @@ to keep long names (for a PC-only FAT drive, for instance).
 
 Instead of a physical drive, the right pane can also show the contents
 of a floppy disk image file - e.g. an Atari ST `.ST` image (also `.IMG`,
-`.IMA`, `.DSK`, `.VFD`, or any raw FAT image). Click **Disk image...**
-(next to **Refresh drives**), pick the file, and copy, move, rename,
-delete or create files and folders inside it exactly as on a real drive.
-**Unmount image** releases it.
+`.IMA`, `.DSK`, `.VFD`, or any raw FAT image). Atari `.MSA` images
+are supported too: they are decoded to a temporary raw image for mtools,
+then encoded back to MSA when the image is unmounted or the application
+is closed. Click **Disk image...** (next to **Refresh drives**), pick the
+file, and copy, move, rename, delete or create files and folders inside
+it exactly as on a real drive. **Unmount image** saves and releases it.
 
 The right pane shows either a drive or an image, never both: mounting
 an image deselects the drive, and choosing a drive unmounts the image.
 
 An image is an ordinary file you own, so mtools opens it directly with
 your own permissions - the privileged helper isn't involved (and doesn't
-even need to be installed for this). Compressed formats such as `.MSA`
-aren't raw FAT images and can't be opened by mtools: convert them to
-`.ST` first.
+even need to be installed for this). MSA changes are written back
+atomically on unmount or application exit; if saving fails, the
+application keeps the temporary image available so the operation can be
+retried.
 
 ## Language
 
